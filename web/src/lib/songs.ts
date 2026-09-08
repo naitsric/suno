@@ -7,10 +7,14 @@ import { songs, type Song } from "@/db/schema";
 import * as engine from "./acestep";
 import { draftSong, ollamaAvailable, planEdit, type EditPlan } from "./ollama";
 import * as voice from "./voice";
+import * as video from "./video";
+import { buildStoryboard } from "./storyboard";
 import { masterAudio, type MasterPreset } from "./master";
 import { analyzeVoice, getVoice, voiceKind, voicePath, voiceProfile, voiceRegister } from "./voices";
 import { applyGender, applyRegister, genderInStyle, voiceBrief, voicePromptTags, type Register } from "./voice-register";
 import { getAlbum, getArtist } from "./artists";
+
+const PORTRAITS_DIR = process.env.PORTRAITS_DIR ?? "./data/portraits";
 
 const AUDIO_DIR = process.env.AUDIO_DIR ?? "./data/audio";
 const VARIANTS = 2;
@@ -153,7 +157,7 @@ export function getSong(id: string): Song | undefined {
 export function deleteSong(id: string) {
   const song = getSong(id);
   if (!song) return false;
-  for (const f of [song.audioFile, song.originalAudioFile, song.rawAudioFile, `${song.id}.raw.mp3`, `${song.id}.voice.raw.mp3`]) {
+  for (const f of [song.audioFile, song.originalAudioFile, song.rawAudioFile, song.videoFile, `${song.id}.raw.mp3`, `${song.id}.voice.raw.mp3`]) {
     if (f) fs.rmSync(path.join(AUDIO_DIR, f), { force: true });
   }
   db.delete(songs).where(eq(songs.id, id)).run();
@@ -169,9 +173,88 @@ export function audioPathFor(song: Song, original = false) {
 export async function syncPending(): Promise<void> {
   await syncGeneration();
   await syncVoiceConversion();
+  await syncVideos();
 }
 
-async function syncGeneration(): Promise<void> {
+/**
+ * Stills video for a finished song: Ollama writes the storyboard (one Pixar scene per section), the video
+ * service renders the images with a consistent character and assembles a Ken Burns slideshow on the song.
+ */
+export async function startVideo(id: string, opts: { subtitles?: boolean } = {}): Promise<Song> {
+  const song = getSong(id);
+  if (!song) throw new Error("No existe");
+  if (song.status !== "done" || !song.audioFile) throw new Error("La canción aún no está lista");
+  if (song.videoStatus === "queued" || song.videoStatus === "rendering") throw new Error("Ya hay un video en marcha para esta canción");
+  if (!(await video.health())) throw new Error("El servicio de video está apagado: ejecuta make video");
+  db.update(songs).set({ videoStatus: "queued", videoProgress: "Escribiendo el guion visual", videoError: null, videoJobId: null, updatedAt: now() }).where(eq(songs.id, id)).run();
+  try {
+    const storyboard = await buildStoryboard(song, song.artistId ? getArtist(song.artistId) ?? null : null);
+    if (opts.subtitles !== false && !song.instrumental && song.lyrics.trim()) {
+      // On-screen lyrics need the sung timing: the voice service aligns the lyrics to the vocals (~1 min).
+      db.update(songs).set({ videoProgress: "Sincronizando la letra con la voz", updatedAt: now() }).where(eq(songs.id, id)).run();
+      try {
+        const aligned = await voice.alignLyrics(path.join(AUDIO_DIR, song.audioFile), song.lyrics, song.vocalLanguage, song.duration);
+        if (aligned.confidence >= 0.25) storyboard.lyrics = aligned.lines;
+        else console.warn(`[video] letra sin sincronizar para ${id}: confianza ${aligned.confidence}`);
+      } catch (err) {
+        console.warn(`[video] sin letra en pantalla para ${id}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    const reference = song.artistId ? path.join(PORTRAITS_DIR, `${song.artistId}.png`) : null;
+    const job = await video.submitVideo(path.join(AUDIO_DIR, song.audioFile), storyboard, { referencePath: reference });
+    db.update(songs)
+      .set({ storyboard: JSON.stringify(storyboard), videoJobId: job.job_id, videoProgress: `🎬 En cola (#${job.queue_position})`, updatedAt: now() })
+      .where(eq(songs.id, id))
+      .run();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    db.update(songs).set({ videoStatus: "failed", videoError: msg.slice(0, 500), videoProgress: "", updatedAt: now() }).where(eq(songs.id, id)).run();
+    throw err;
+  }
+  return getSong(id)!;
+}
+
+async function syncVideos(): Promise<void> {
+  const rows = db.select().from(songs).where(inArray(songs.videoStatus, ["queued", "rendering"])).all();
+  if (rows.length === 0) return;
+  fs.mkdirSync(AUDIO_DIR, { recursive: true });
+  for (const row of rows) {
+    if (!row.videoJobId) continue; // storyboard still being written by startVideo
+    try {
+      const job = await video.videoStatus(row.videoJobId);
+      if (!job) {
+        db.update(songs).set({ videoStatus: "failed", videoError: "El servicio de video se reinició y perdió el trabajo; vuelve a lanzarlo", videoProgress: "", updatedAt: now() }).where(eq(songs.id, row.id)).run();
+      } else if (job.status === "failed") {
+        db.update(songs).set({ videoStatus: "failed", videoError: job.error ?? "error desconocido", videoProgress: "", updatedAt: now() }).where(eq(songs.id, row.id)).run();
+      } else if (job.status === "done") {
+        const buf = await video.downloadVideo(row.videoJobId);
+        const videoFile = `${row.id}.video.mp4`;
+        fs.writeFileSync(path.join(AUDIO_DIR, videoFile), buf);
+        db.update(songs).set({ videoStatus: "done", videoFile, videoProgress: "", videoError: null, updatedAt: now() }).where(eq(songs.id, row.id)).run();
+      } else {
+        const pct = job.total ? ` · ${job.done}/${job.total}` : "";
+        db.update(songs).set({ videoStatus: "rendering", videoProgress: `🎬 ${job.stage}${job.status === "rendering" ? pct : ""}`, updatedAt: now() }).where(eq(songs.id, row.id)).run();
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      db.update(songs).set({ videoProgress: `🎬 Servicio de video no disponible: ${msg}`.slice(0, 300), updatedAt: now() }).where(eq(songs.id, row.id)).run();
+    }
+  }
+}
+
+let generationSyncInFlight: Promise<void> | null = null;
+
+/** Serialises overlapping polls (UI + curl) so two syncs never download the same task twice. */
+function syncGeneration(): Promise<void> {
+  if (!generationSyncInFlight) {
+    generationSyncInFlight = syncGenerationOnce().finally(() => {
+      generationSyncInFlight = null;
+    });
+  }
+  return generationSyncInFlight;
+}
+
+async function syncGenerationOnce(): Promise<void> {
   const pending = db
     .select()
     .from(songs)
@@ -217,9 +300,10 @@ async function syncGeneration(): Promise<void> {
     // Succeeded: one item per generated audio.
     const files = task.items.filter((i) => i.file);
     fs.mkdirSync(AUDIO_DIR, { recursive: true });
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const item = files[i];
+    for (const row of rows) {
+      // Index by the row's variant, not by its position in `rows`: a concurrent sync may
+      // already have finished variant 0, and `files[0]` would then land on variant 1.
+      const item = files[row.variant];
       if (!item) {
         // Engine produced fewer variants than requested (e.g. batch limited on Mac).
         db.delete(songs).where(eq(songs.id, row.id)).run();
