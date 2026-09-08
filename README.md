@@ -231,6 +231,11 @@ análisis tarda 3–5 min con el modelo de 12B y se cachea por fotografía + per
    > fine-tuning de Seed-VC con la voz del artista (`engine/voice/seed-vc/train.py`, preset
    > `config_dit_mel_seed_uvit_whisper_base_f0_44k.yml`, carpeta con los stems de voz de sus canciones,
    > ~100–500 pasos en MPS) o un LoRA del artista en ACE-Step para que el motor cante ya con esa voz.
+   **Veredicto del usuario (sept. 2026)** sobre la misma canción: crudo ✅, híbrido a 3 kHz ✅, candidato elegido
+   por parecido ✅, conversión completa de Seed-VC (60 pasos + deharsh 4) ❌ «metálica». Por eso la interfaz ofrece
+   «Híbrido (recomendado)» / «Conversión completa» al crear y en «Voz y afinado» (`keepHighsHz: 3000`), y la
+   selección por parecido como alternativa sin conversión.
+
    **Elegir en vez de convertir** («Elegir la generación más parecida» y «candidatos» en el panel de crear;
    `variants` 1–6 y `voiceMatchId` en `POST /api/songs`; `POST /api/songs/[id]/voice-match {voiceId}` para una
    canción hecha, o «🎯 medir parecido» en la tarjeta). Cada generación tiene un cantante aleatorio, así que

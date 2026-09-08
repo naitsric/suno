@@ -25,6 +25,8 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
   const [useVoice, setUseVoice] = useState(false);
   /** convert = Seed-VC over the generation; match = generate several and score which singer is closest (no conversion). */
   const [voiceMode, setVoiceMode] = useState<"convert" | "match">("convert");
+  /** Hybrid conversion (Seed-VC below 3 kHz, the generated singer's highs above): the full re-synthesis sounded metallic. */
+  const [hybrid, setHybrid] = useState(true);
   const [variants, setVariants] = useState(2);
   const [useLora, setUseLora] = useState(false);
   const [autotune, setAutotune] = useState(false);
@@ -94,6 +96,7 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
           model: model || null,
           voiceId: useVoice && !instrumental && selectedVoice && voiceMode === "convert" ? selectedVoice.id : null,
           autotune: useVoice && !instrumental && !!selectedVoice && voiceMode === "convert" && autotune,
+          voiceOptions: useVoice && !instrumental && selectedVoice && voiceMode === "convert" && hybrid ? { keepHighsHz: 3000 } : null,
           voiceMatchId: useVoice && !instrumental && selectedVoice ? selectedVoice.id : null,
           useLora: !!artist && artist.loraStatus === "done" && useLora,
           variants: useVoice && !instrumental && selectedVoice ? variants : undefined,
@@ -250,6 +253,12 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
                     <option value="convert">Convertir la voz (Seed-VC)</option>
                     <option value="match">Elegir la generación más parecida (sin convertir)</option>
                   </select>
+                  {voiceMode === "convert" && (
+                    <select value={hybrid ? "hybrid" : "full"} onChange={(e) => setHybrid(e.target.value === "hybrid")} className={inputCls} title="Híbrido: voz convertida solo por debajo de 3 kHz y agudos del cantante generado (menos textura sintética). Completa: toda la voz re-sintetizada.">
+                      <option value="hybrid">Híbrido (recomendado)</option>
+                      <option value="full">Conversión completa</option>
+                    </select>
+                  )}
                   <label className="flex items-center gap-1 text-muted">
                     candidatos
                     <select value={variants} onChange={(e) => setVariants(Number(e.target.value))} className={inputCls} title="Generaciones por creación; cada una se puntúa contra la voz (🎯 en la tarjeta)">

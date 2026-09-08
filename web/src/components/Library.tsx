@@ -169,6 +169,15 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
   const [autotune, setAutotune] = useState(song.autotune);
   const [reconverting, setReconverting] = useState(false);
   const [voiceId, setVoiceId] = useState(song.voiceId ?? "");
+  // Conversion mode: hybrid (Seed-VC below 3 kHz, the model singer's own highs above) is what the user kept;
+  // the full Seed-VC re-synthesis sounded metallic to them. Stored per song in voiceOptions.
+  const [hybrid, setHybrid] = useState(() => {
+    try {
+      return song.voiceOptions ? (JSON.parse(song.voiceOptions) as { keepHighsHz?: number }).keepHighsHz !== undefined : true;
+    } catch {
+      return true;
+    }
+  });
   const [makingVoice, setMakingVoice] = useState(false);
   const artistVoices = voices.filter((v) => v.artistId === song.artistId || (!song.artistId && !v.artistId));
 
@@ -193,7 +202,7 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
     setReconverting(true);
     setPpError(null);
     try {
-      const res = await fetch(`/api/songs/${song.id}/voice`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ autotune, ...(voiceId && voiceId !== song.voiceId ? { voiceId } : {}) }) });
+      const res = await fetch(`/api/songs/${song.id}/voice`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ autotune, ...(voiceId && voiceId !== song.voiceId ? { voiceId } : {}), options: hybrid ? { keepHighsHz: 3000 } : null }) });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "No se pudo reconvertir");
       onUpdated(body.song as SongDTO);
@@ -403,6 +412,10 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
                       <span className="block text-[11px] text-muted">Vuelve a convertir con la voz elegida{autotune ? `, corrigiendo la entonación${song.keyScale ? ` a ${song.keyScale}` : ""}` : ""} · 1–3 min</span>
                     </span>
                     <span className="flex items-center gap-2">
+                      <select value={hybrid ? "hybrid" : "full"} onChange={(e) => setHybrid(e.target.value === "hybrid")} className="max-w-36 rounded-md border border-border bg-panel px-2 py-1 text-xs outline-none focus:border-accent-2" title="Híbrido: la voz convertida solo por debajo de 3 kHz y los agudos del cantante original (menos textura sintética). Completa: toda la voz re-sintetizada por Seed-VC.">
+                        <option value="hybrid">Híbrido (recomendado)</option>
+                        <option value="full">Conversión completa</option>
+                      </select>
                       <select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} className="max-w-36 rounded-md border border-border bg-panel px-2 py-1 text-xs outline-none focus:border-accent-2" title="Voz con la que se reconvierte">
                         {!song.voiceId && <option value="">Elige una voz</option>}
                         {artistVoices.map((v) => (
