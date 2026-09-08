@@ -2,9 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { isRegister, parseVoiceProfile, REGISTER_LABEL, voicePromptTags } from "@/lib/voice-register";
+import type { ReferenceResult } from "@/lib/reference";
 import { KNOWN_MODELS, LANGUAGES, type AlbumDTO, type ArtistDTO, type CreateDraft, type EngineStatus, type SongDTO, type VoiceDTO } from "@/lib/types";
 
 type Mode = "simple" | "custom";
+/** Tempo/key measured on a YouTube reference, sent to the engine as fixed metadata. */
+type ReferenceMeta = { bpm: number; keyScale: string | null; title: string | null };
 
 const STYLE_IDEAS = ["reggaeton, latin trap, 808s, male vocals", "indie folk, acoustic guitar, warm, female vocals", "synthwave, retro, 80s, driving", "boom bap hip hop, jazzy samples, rap", "bachata, romantic, guitars", "lo-fi hip hop, chill, instrumental", "rock alternativo, guitarras distorsionadas, energético", "bolero, orquestal, nostálgico"];
 
@@ -25,6 +28,7 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
   const [albumId, setAlbumId] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
   const [writing, setWriting] = useState(false);
+  const [referenceMeta, setReferenceMeta] = useState<ReferenceMeta | null>(null);
   const selectedVoice = voices.find((v) => v.id === voiceId) ?? voices.find((v) => v.id === artist?.defaultVoiceId) ?? voices[0];
   const engineOnline = !!status?.engine.online;
 
@@ -36,6 +40,7 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
       setUseVoice(!!artist?.defaultVoiceId);
       setVoiceId(artist?.defaultVoiceId ?? "");
       setAlbumId("");
+      setReferenceMeta(null);
       if (draft) {
         setMode(draft.mode ?? "simple");
         setTitle(draft.title ?? "");
@@ -87,6 +92,8 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
           autotune: useVoice && !instrumental && !!selectedVoice && autotune,
           artistId: artist?.id ?? null,
           albumId: artist && albumId ? albumId : null,
+          bpm: referenceMeta?.bpm ?? null,
+          keyScale: referenceMeta?.keyScale ?? null,
         }),
       });
       const body = await res.json();
@@ -124,6 +131,27 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
           <p className="mt-1 text-muted">{draft.title ? "Se usarán este título y estilo. Edita la descripción si quieres" : "Se usará este estilo. Completa de qué trata la canción"} y pulsa «Crear canción».</p>
         </div>
       )}
+
+      <ReferenceBox
+        artist={artist}
+        voiceOnline={!!status?.voice.online}
+        onError={onError}
+        applied={referenceMeta}
+        onClear={() => setReferenceMeta(null)}
+        onUse={(r, how) => {
+          const p = r.prompt;
+          if (how === "style") {
+            setStyle(p.style);
+            setMode("custom");
+          } else {
+            const line = `Que suene como la referencia: ${p.caption || p.style}. Estructura: ${p.structure}`;
+            setDescription((d) => (d.trim() ? `${d.trim()}\n\n${line}` : line));
+            setStyle(p.style);
+          }
+          if (r.analysis.vocals.language && !artist?.vocalLanguage) setLanguage(r.analysis.vocals.language);
+          setReferenceMeta({ bpm: p.bpm, keyScale: p.keyScale, title: r.analysis.source.title });
+        }}
+      />
 
       {mode === "simple" ? (
         <Field label="Describe tu canción" hint="Tema, género, mood, instrumentos, tipo de voz…">
@@ -249,6 +277,141 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
       <p className="text-[11px] text-muted leading-relaxed">
         Cada creación produce 2 variantes. En un Mac la generación tarda ~30 s por minuto de audio. Modo simple escribe la letra con {status?.ollama.online ? `Ollama (${status.ollama.model})` : "el LM de ACE-Step"}.
       </p>
+    </div>
+  );
+}
+
+/**
+ * "Sounds like this YouTube video": the voice service measures the song (tempo, key, stems, vocals,
+ * CLAP tags) and Ollama writes a style prompt from the measurements. Results are cached per video.
+ */
+function ReferenceBox({ artist, voiceOnline, applied, onUse, onClear, onError }: { artist: ArtistDTO | null; voiceOnline: boolean; applied: ReferenceMeta | null; onUse: (r: ReferenceResult, how: "style" | "description") => void; onClear: () => void; onError: (e: string | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const [running, setRunning] = useState(false);
+  const [stage, setStage] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [result, setResult] = useState<ReferenceResult | null>(null);
+  const [showAnalysis, setShowAnalysis] = useState(false);
+
+  useEffect(() => {
+    if (!running) return;
+    const started = Date.now();
+    const id = window.setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, [running]);
+
+  const analyze = async (refresh = false) => {
+    if (!url.trim()) return onError("Pega la URL de un video de YouTube.");
+    setRunning(true);
+    setStage("Enviando al servicio de voz");
+    setElapsed(0);
+    onError(null);
+    const token = `ref-${Math.random().toString(36).slice(2)}`;
+    const poll = window.setInterval(async () => {
+      try {
+        const r = await fetch(`/api/reference?token=${token}`, { cache: "no-store" });
+        const body = (await r.json()) as { stage: string | null };
+        if (body.stage) setStage(body.stage);
+      } catch {
+        /* keep the last stage */
+      }
+    }, 3000);
+    try {
+      const res = await fetch("/api/reference", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: url.trim(), artistId: artist?.id ?? null, refresh, token }) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "No se pudo analizar la referencia");
+      setResult(body as ReferenceResult);
+      setShowAnalysis(false);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      window.clearInterval(poll);
+      setRunning(false);
+      setStage(null);
+    }
+  };
+
+  const a = result?.analysis;
+  const chips = a
+    ? [
+        ...a.tags.genres.slice(0, 2).map((s) => `${s.label} ${Math.round(s.score * 100)}%`),
+        ...a.tags.moods.slice(0, 2).map((s) => s.label),
+        ...a.tags.instruments.slice(0, 4).map((s) => s.label),
+        a.vocals.present ? `${a.vocals.pitch ? `${a.vocals.pitch.gender_guess === "male" ? "voz masculina" : a.vocals.pitch.gender_guess === "female" ? "voz femenina" : "voz"} · ${a.vocals.pitch.register} ${a.vocals.pitch.low_note}–${a.vocals.pitch.high_note}` : "con voz"}${a.vocals.language ? ` · ${a.vocals.language}` : ""}` : "instrumental",
+        `${a.bpm} bpm`,
+        a.key,
+      ]
+    : [];
+
+  return (
+    <div className="rounded-lg border border-border bg-panel text-sm">
+      <button type="button" onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between px-3 py-2.5 text-left">
+        <span>🎧 Que suene como un video de YouTube</span>
+        <span className="text-xs text-muted">{applied ? `${applied.bpm} bpm${applied.keyScale ? ` · ${applied.keyScale}` : ""} fijados` : open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-2 border-t border-border px-3 py-2.5">
+          <div className="flex gap-2">
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://www.youtube.com/watch?v=…" className={`${inputCls} text-xs`} disabled={running} />
+            <button type="button" onClick={() => analyze(false)} disabled={running || !voiceOnline} className="shrink-0 rounded-md border border-accent-2/50 px-3 py-2 text-xs text-fg hover:bg-accent-2/20 disabled:opacity-50">
+              {running ? "Analizando…" : "Analizar"}
+            </button>
+          </div>
+          {!voiceOnline && <p className="text-[11px] text-muted">El servicio de voz está apagado: ejecuta make voice.</p>}
+          {running && (
+            <p className="text-[11px] text-muted">
+              {stage ?? "Analizando"}… {elapsed} s. Descarga, medición, separación de stems, etiquetado y escritura del prompt: 1–3 min la primera vez (la segunda es instantánea).
+            </p>
+          )}
+          {result && a && (
+            <div className="flex flex-col gap-2">
+              <p className="text-xs">
+                <span className="font-medium text-fg">{a.source.title ?? "Referencia"}</span>
+                {a.source.channel && <span className="text-muted"> · {a.source.channel}</span>}
+                {result.cached && <span className="text-muted"> · análisis guardado</span>}
+              </p>
+              <div className="flex flex-wrap gap-1">
+                {chips.map((c) => (
+                  <span key={c} className="rounded-full border border-border bg-panel-2/60 px-2 py-0.5 text-[11px] text-muted">{c}</span>
+                ))}
+              </div>
+              <p className="text-[11px] leading-relaxed text-muted">{result.prompt.summary}</p>
+              <p className="text-[11px] leading-relaxed text-muted">{result.prompt.structure}</p>
+              <p className="rounded-md bg-panel-2/60 px-2 py-1 font-mono text-[10px] leading-relaxed text-muted" title="Estilo sugerido">{result.prompt.style}</p>
+              {result.prompt.caption && <p className="text-[11px] italic leading-relaxed text-muted">{result.prompt.caption}</p>}
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" onClick={() => onUse(result, "style")} className="rounded-md bg-accent-2/80 px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-2">Usar como estilo</button>
+                <button type="button" onClick={() => onUse(result, "description")} className="rounded-md border border-accent-2/50 px-3 py-1.5 text-xs text-fg hover:bg-accent-2/20">Añadir a la descripción</button>
+                <button type="button" onClick={() => setShowAnalysis((v) => !v)} className="text-[11px] text-muted underline">{showAnalysis ? "Ocultar medidas" : "Ver medidas"}</button>
+                <button type="button" onClick={() => analyze(true)} disabled={running} className="text-[11px] text-muted underline disabled:opacity-50">Volver a analizar</button>
+              </div>
+              {showAnalysis && (
+                <dl className="grid grid-cols-2 gap-x-3 gap-y-1 rounded-md bg-panel-2/60 px-2 py-1.5 text-[11px] text-muted">
+                  <dt>Tempo</dt><dd>{a.bpm} bpm (pulso {Math.round(a.pulse_clarity * 100)}%{a.bpm_alternatives.length ? `, o ${a.bpm_alternatives.join("/")}` : ""})</dd>
+                  <dt>Tonalidad</dt><dd>{a.key} ({Math.round(a.key_confidence * 100)}%)</dd>
+                  <dt>Sonoridad</dt><dd>{a.loudness_dbfs} dBFS · rango {a.dynamic_range_db} dB</dd>
+                  <dt>Brillo</dt><dd>{a.brightness_hz} Hz · {a.onsets_per_sec} ataques/s</dd>
+                  <dt>Stems</dt><dd>batería {Math.round(a.stems.drums * 100)}% · bajo {Math.round(a.stems.bass * 100)}% · resto {Math.round(a.stems.other * 100)}% · voz {Math.round(a.stems.vocals * 100)}%</dd>
+                  <dt>Voz</dt><dd>{a.vocals.present ? `${Math.round(a.vocals.activity * 100)}% del tiempo${a.vocals.pitch ? ` · mediana ${a.vocals.pitch.median_note}` : ""}${a.vocals.language ? ` · ${a.vocals.language} ${Math.round((a.vocals.language_probability ?? 0) * 100)}%` : ""}` : "no"}</dd>
+                  <dt>Estilo vocal</dt><dd>{a.tags.vocals.slice(0, 3).map((s) => `${s.label} ${Math.round(s.score * 100)}%`).join(", ") || "—"}</dd>
+                  <dt>Producción</dt><dd>{a.tags.production.slice(0, 3).map((s) => `${s.label} ${Math.round(s.score * 100)}%`).join(", ")}</dd>
+                  <dt>Instrumentos</dt><dd className="col-span-2">{a.tags.instruments.map((s) => `${s.label} ${Math.round(s.score * 100)}%`).join(", ")}</dd>
+                  <dt>Secciones</dt><dd className="col-span-2">{a.structure.map((s) => `${s.role} ${Math.floor(s.start / 60)}:${Math.floor(s.start % 60).toString().padStart(2, "0")} (${s.energy})`).join(" · ")}</dd>
+                  {a.vocals.transcript_snippet && (<><dt>Letra oída</dt><dd className="col-span-2 italic">“{a.vocals.transcript_snippet.slice(0, 160)}…”</dd></>)}
+                  <dt>Tiempos</dt><dd className="col-span-2">{Object.entries(a.timings).map(([k, v]) => `${k} ${v}s`).join(" · ")}</dd>
+                </dl>
+              )}
+            </div>
+          )}
+          {applied && (
+            <p className="flex items-center justify-between text-[11px] text-muted">
+              <span>Se enviarán al motor {applied.bpm} bpm{applied.keyScale ? ` y ${applied.keyScale}` : ""} medidos en «{applied.title ?? "la referencia"}».</span>
+              <button type="button" onClick={onClear} className="underline">quitar</button>
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

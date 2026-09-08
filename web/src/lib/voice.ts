@@ -40,6 +40,22 @@ export async function analyzeReference(referencePath: string, kind: VoiceKind = 
   return (await res.json()) as ReferenceProfile;
 }
 
+export type TimedWord = { text: string; start: number; end: number };
+export type TimedLine = { text: string; start: number; end: number; matched: number; words: TimedWord[] };
+
+/** Times every lyric line/word against the sung vocals (Demucs + faster-whisper + alignment). ~1 min per song. */
+export async function alignLyrics(songPath: string, lyrics: string, language: string, duration: number | null): Promise<{ lines: TimedLine[]; confidence: number }> {
+  const form = new FormData();
+  form.append("audio", new Blob([fs.readFileSync(songPath)]), path.basename(songPath));
+  form.append("lyrics", lyrics);
+  form.append("language", language);
+  form.append("model", "medium");
+  form.append("duration", String(duration ?? 0));
+  const res = await fetch(`${BASE}/align-lyrics`, { method: "POST", body: form, signal: AbortSignal.timeout(15 * 60_000) });
+  if (!res.ok) throw new Error(`Alineación de la letra falló (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  return (await res.json()) as { lines: TimedLine[]; confidence: number };
+}
+
 /** The best 30 s of a song's vocals as a sung reference (WAV mono 44.1 kHz) plus where it was taken from. */
 export async function extractReference(songPath: string, seconds = 30): Promise<{ wav: Buffer; info: { start_sec: number; end_sec: number; sung_density: number } | null }> {
   const form = new FormData();
@@ -108,4 +124,39 @@ export async function enhanceAudio(songPath: string): Promise<Buffer> {
   const res = await fetch(`${BASE}/enhance`, { method: "POST", body: form, signal: AbortSignal.timeout(20 * 60_000) });
   if (!res.ok) throw new Error(`Realce IA falló (${res.status}): ${(await res.text()).slice(0, 200)}`);
   return Buffer.from(await res.arrayBuffer());
+}
+
+export type ReferenceProgress = { stage: string | null };
+
+/**
+ * Measures a reference song (YouTube URL or local file) with the voice service: tempo, key, energy,
+ * structure, stem balance, vocals + language and CLAP genre/mood/instrument tags. 1–3 min per song;
+ * `token` lets the caller poll `referenceProgress` meanwhile.
+ */
+export async function analyzeMusicReference(input: { url?: string; filePath?: string; token?: string }): Promise<Record<string, unknown>> {
+  const form = new FormData();
+  if (input.filePath) form.append("audio", new Blob([fs.readFileSync(input.filePath)]), path.basename(input.filePath));
+  else form.append("url", input.url ?? "");
+  if (input.token) form.append("token", input.token);
+  const res = await fetch(`${BASE}/reference-analysis`, { method: "POST", body: form, signal: AbortSignal.timeout(15 * 60_000) });
+  if (!res.ok) {
+    const text = (await res.text()).slice(0, 300);
+    let detail = text;
+    try {
+      detail = (JSON.parse(text) as { detail?: string }).detail ?? text;
+    } catch {
+      /* plain text */
+    }
+    throw new Error(res.status === 422 ? detail : `Análisis de referencia falló (${res.status}): ${detail}`);
+  }
+  return (await res.json()) as Record<string, unknown>;
+}
+
+export async function referenceProgress(token: string): Promise<ReferenceProgress> {
+  try {
+    const res = await fetch(`${BASE}/reference-analysis/${encodeURIComponent(token)}`, { cache: "no-store", signal: AbortSignal.timeout(3000) });
+    return res.ok ? ((await res.json()) as ReferenceProgress) : { stage: null };
+  } catch {
+    return { stage: null };
+  }
 }

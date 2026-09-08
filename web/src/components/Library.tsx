@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { coverGradient, fmtTime, type AlbumDTO, type ArtistDTO, type SongDTO, type VoiceDTO } from "@/lib/types";
 import { MASTER_LABELS, MASTER_PRESETS, type MasterPreset } from "@/lib/master-presets";
+import ImageGenerator from "./ImageGenerator";
 
 type LibraryProps = {
   songs: SongDTO[];
@@ -23,6 +24,7 @@ type LibraryProps = {
 
 export default function Library({ songs, current, artist, artists, voices, albums, playerTime, onPlay, onDelete, onUpdated, onCreated, onAlbumsChanged, onVoicesChanged, onError }: LibraryProps) {
   const [albumFilter, setAlbumFilter] = useState<string | "all" | "none">("all");
+  const [coverEditor, setCoverEditor] = useState<string | null>(null);
   const [newAlbum, setNewAlbum] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
   const artistAlbums = artist ? albums.filter((a) => a.artistId === artist.id) : [];
@@ -57,8 +59,12 @@ export default function Library({ songs, current, artist, artists, voices, album
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="mr-2 text-sm font-medium uppercase tracking-wide text-muted">
-          {artist ? `${artist.emoji} ${artist.name}` : "Biblioteca"} · {visible.length}
+        <h2 className="mr-2 flex items-center gap-2 text-sm font-medium uppercase tracking-wide text-muted">
+          {artist?.imageFile && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={`/api/artists/${artist.id}/image?v=${encodeURIComponent(artist.imageFile)}`} alt="" className="h-7 w-7 rounded-md object-cover" />
+          )}
+          <span>{artist ? `${artist.imageFile ? "" : `${artist.emoji} `}${artist.name}` : "Biblioteca"} · {visible.length}</span>
         </h2>
         {artist && (
           <>
@@ -72,6 +78,7 @@ export default function Library({ songs, current, artist, artists, voices, album
                     {chip(albumFilter === a.id, () => setAlbumFilter(a.id), `💿 ${a.name} · ${songs.filter((s) => s.albumId === a.id).length}`)}
                     {albumFilter === a.id && (
                       <span className="ml-1 flex gap-0.5">
+                        <button onClick={() => setCoverEditor(coverEditor === a.id ? null : a.id)} className="rounded px-1 text-[11px] text-muted hover:text-fg" title="Portada del álbum (OpenAI)">🖼</button>
                         <button onClick={() => setRenaming({ id: a.id, name: a.name })} className="rounded px-1 text-[11px] text-muted hover:text-fg" title="Renombrar">✎</button>
                         <button onClick={() => deleteAlbum(a.id)} className="rounded px-1 text-[11px] text-muted hover:text-red-300" title="Eliminar álbum (las canciones se conservan)">✕</button>
                       </span>
@@ -90,6 +97,25 @@ export default function Library({ songs, current, artist, artists, voices, album
         )}
       </div>
 
+      {coverEditor && artistAlbums.some((a) => a.id === coverEditor) && (
+        <div className="rounded-xl border border-border bg-panel p-3 text-xs">
+          <p className="mb-2 font-medium uppercase tracking-wide text-muted">Portada · {artistAlbums.find((a) => a.id === coverEditor)?.name}</p>
+          <ImageGenerator
+            key={coverEditor}
+            kind="album"
+            id={coverEditor}
+            compact
+            placeholder="💿"
+            imageUrl={(() => {
+              const a = artistAlbums.find((x) => x.id === coverEditor);
+              return a?.imageFile ? `/api/albums/${a.id}/image?v=${encodeURIComponent(a.imageFile)}` : null;
+            })()}
+            onGenerated={() => onAlbumsChanged()}
+            onError={onError}
+          />
+        </div>
+      )}
+
       {visible.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center text-muted">
           <div className="mb-3 h-16 w-16 rounded-2xl opacity-60" style={{ background: coverGradient(artist?.id ?? "empty") }} />
@@ -98,24 +124,43 @@ export default function Library({ songs, current, artist, artists, voices, album
         </div>
       ) : (
         visible.map((s) => (
-          <SongCard key={s.id} song={s} active={current?.id === s.id} artists={artists} voices={voices} onVoicesChanged={onVoicesChanged} albums={albums} songs={songs} playerTime={current?.id === s.id ? playerTime : null} onPlay={() => onPlay(s)} onDelete={() => onDelete(s.id)} onUpdated={onUpdated} onCreated={onCreated} onError={onError} />
+          <SongCard key={s.id} song={s} active={current?.id === s.id} artists={artists} voices={voices} onVoicesChanged={onVoicesChanged} onAlbumsChanged={onAlbumsChanged} albums={albums} songs={songs} playerTime={current?.id === s.id ? playerTime : null} onPlay={() => onPlay(s)} onDelete={() => onDelete(s.id)} onUpdated={onUpdated} onCreated={onCreated} onError={onError} />
         ))
       )}
     </div>
   );
 }
 
-function SongCard({ song, active, artists, voices, onVoicesChanged, albums, songs, playerTime, onPlay, onDelete, onUpdated, onCreated, onError }: { song: SongDTO; active: boolean; artists: ArtistDTO[]; voices: VoiceDTO[]; onVoicesChanged?: () => void; albums: AlbumDTO[]; songs: SongDTO[]; playerTime: number | null; onPlay: () => void; onDelete: () => void; onUpdated: (s: SongDTO) => void; onCreated: (s: SongDTO[]) => void; onError: (e: string | null) => void }) {
+function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChanged, albums, songs, playerTime, onPlay, onDelete, onUpdated, onCreated, onError }: { song: SongDTO; active: boolean; artists: ArtistDTO[]; voices: VoiceDTO[]; onVoicesChanged?: () => void; onAlbumsChanged?: () => void; albums: AlbumDTO[]; songs: SongDTO[]; playerTime: number | null; onPlay: () => void; onDelete: () => void; onUpdated: (s: SongDTO) => void; onCreated: (s: SongDTO[]) => void; onError: (e: string | null) => void }) {
   const [open, setOpen] = useState(false);
   const parent = song.parentId ? songs.find((x) => x.id === song.parentId) ?? null : null;
   const songArtist = artists.find((a) => a.id === song.artistId) ?? null;
   const songAlbum = albums.find((a) => a.id === song.albumId) ?? null;
+  const coverUrl = songAlbum?.imageFile ? `/api/albums/${songAlbum.id}/image?v=${encodeURIComponent(songAlbum.imageFile)}` : songArtist?.imageFile ? `/api/artists/${songArtist.id}/image?v=${encodeURIComponent(songArtist.imageFile)}` : null;
 
   const move = async (patch: { artistId?: string | null; albumId?: string | null }) => {
     const res = await fetch(`/api/songs/${song.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) });
     const body = await res.json();
     if (!res.ok) return onError(body.error ?? "No se pudo mover");
     onUpdated(body.song as SongDTO);
+  };
+  const [newAlbumName, setNewAlbumName] = useState<string | null>(null);
+  const artistAlbums = albums.filter((a) => a.artistId === song.artistId);
+
+  /** Inline album picker on the card: pick an album, "Sin álbum", or create one and move the song into it. */
+  const chooseAlbum = async (value: string) => {
+    if (value === "__new__") return setNewAlbumName("");
+    await move({ albumId: value || null });
+  };
+  const createAlbumAndMove = async () => {
+    const name = (newAlbumName ?? "").trim();
+    setNewAlbumName(null);
+    if (!name || !song.artistId) return;
+    const res = await fetch(`/api/artists/${song.artistId}/albums`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+    const body = await res.json();
+    if (!res.ok) return onError(body.error ?? "No se pudo crear el álbum");
+    onAlbumsChanged?.();
+    await move({ albumId: body.album.id });
   };
   const [processing, setProcessing] = useState(false);
   const [ppError, setPpError] = useState<string | null>(null);
@@ -180,6 +225,10 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, albums, song
     <article className={`rounded-xl border bg-panel p-3 transition ${active ? "border-accent-2" : "border-border"}`}>
       <div className="flex gap-3">
         <button onClick={onPlay} disabled={song.status !== "done"} className="group relative h-20 w-20 shrink-0 overflow-hidden rounded-lg disabled:cursor-default" style={{ background: coverGradient(song.taskId ?? song.id) }} aria-label="Reproducir">
+          {coverUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={coverUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
+          )}
           {song.status === "done" && (
             <span className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 transition group-hover:opacity-100">
               <PlayIcon />
@@ -208,9 +257,23 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, albums, song
                   </span>
                 )}
               </h3>
-              <p className="truncate text-xs text-muted">
-                {[songArtist ? `${songArtist.emoji} ${songArtist.name}` : null, songAlbum ? `💿 ${songAlbum.name}` : null, song.mode === "simple" ? "Simple" : "Personalizado", song.instrumental ? "Instrumental" : song.vocalLanguage.toUpperCase(), song.duration ? fmtTime(song.duration) : null, song.bpm ? `${song.bpm} bpm` : null, song.keyScale].filter(Boolean).join(" · ")}
-              </p>
+              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted">
+                {songArtist && <span>{songArtist.emoji} {songArtist.name}</span>}
+                {songArtist && (
+                  newAlbumName !== null ? (
+                    <input autoFocus value={newAlbumName} onChange={(e) => setNewAlbumName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") createAlbumAndMove(); if (e.key === "Escape") setNewAlbumName(null); }} onBlur={createAlbumAndMove} placeholder="Nombre del álbum ⏎" className="w-40 rounded-md border border-accent-2 bg-panel-2 px-2 py-0.5 text-[11px] outline-none" />
+                  ) : (
+                    <select value={song.albumId ?? ""} onChange={(e) => chooseAlbum(e.target.value)} title="Álbum de esta canción" className={`max-w-44 truncate rounded-md border border-border bg-panel-2 px-1.5 py-0.5 text-[11px] outline-none focus:border-accent-2 ${songAlbum ? "text-fg" : ""}`}>
+                      <option value="">💿 Sin álbum</option>
+                      {artistAlbums.map((a) => (
+                        <option key={a.id} value={a.id}>💿 {a.name}</option>
+                      ))}
+                      <option value="__new__">＋ Nuevo álbum…</option>
+                    </select>
+                  )
+                )}
+                <span className="truncate">{[song.mode === "simple" ? "Simple" : "Personalizado", song.instrumental ? "Instrumental" : song.vocalLanguage.toUpperCase(), song.duration ? fmtTime(song.duration) : null, song.bpm ? `${song.bpm} bpm` : null, song.keyScale].filter(Boolean).join(" · ")}</span>
+              </div>
             </div>
             <div className="flex shrink-0 items-center gap-1">
               {song.status === "done" && song.originalAudioFile && (
@@ -336,6 +399,7 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, albums, song
                 {ppError && <p className="mt-1 text-red-300">{ppError}</p>}
               </div>
             )}
+            {song.status === "done" && song.audioFile && <VideoSection song={song} onUpdated={onUpdated} />}
             {song.status === "done" && song.audioFile && <EditSection song={song} playerTime={playerTime} onCreated={onCreated} onError={onError} />}
             <p className="mb-1 font-medium uppercase tracking-wide text-muted">Letra</p>
             <pre className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[12px] leading-relaxed text-fg/90">{song.lyrics || "—"}</pre>
@@ -463,6 +527,86 @@ function EditSection({ song, playerTime, onCreated, onError }: { song: SongDTO; 
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Stills video: one Pixar image per section with a consistent character, Ken Burns motion, cut on the bars. */
+function VideoSection({ song, onUpdated }: { song: SongDTO; onUpdated: (s: SongDTO) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [subtitles, setSubtitles] = useState(true);
+  const [provider, setProvider] = useState<"openai" | "local">("openai");
+  const status = song.videoStatus ?? "none";
+  const scenes = (() => {
+    try {
+      return song.storyboard ? (JSON.parse(song.storyboard) as { scenes: { section: string; prompt: string; duration: number }[] }).scenes : [];
+    } catch {
+      return [];
+    }
+  })();
+
+  const start = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch(`/api/songs/${song.id}/video`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ subtitles: subtitles && !song.instrumental, provider }) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "No se pudo crear el video");
+      onUpdated(body.song as SongDTO);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sceneCount = Math.min(18, Math.max(6, Math.round((song.duration ?? 180) / 17)));
+  const minutes = provider === "openai" ? Math.max(3, Math.round(sceneCount * 0.4) + 2) : Math.max(3, Math.round(((song.duration ?? 180) / 15) * 1.1));
+  const cost = provider === "openai" ? ` · ≈ ${(sceneCount * 0.06).toFixed(2)} USD` : "";
+  const providerSelect = (
+    <select value={provider} onChange={(e) => setProvider(e.target.value as typeof provider)} className="rounded-md border border-border bg-panel px-2 py-1 text-[11px] outline-none focus:border-accent-2" title="Con qué se generan las imágenes">
+      <option value="openai">Imágenes: OpenAI</option>
+      <option value="local">Imágenes: local (Wan)</option>
+    </select>
+  );
+  return (
+    <div className="mb-3 rounded-lg border border-border bg-panel-2/60 p-3">
+      <p className="mb-2 font-medium uppercase tracking-wide text-muted">🎬 Video de imágenes</p>
+      {status === "done" && song.videoFile ? (
+        <div className="flex flex-col gap-2">
+          <video controls preload="metadata" src={`/api/songs/${song.id}/video`} className="w-full rounded-md bg-black" />
+          <div className="flex items-center gap-3">
+            <a href={`/api/songs/${song.id}/video?download`} className="text-muted hover:text-fg">descargar MP4</a>
+            {!song.instrumental && (
+              <label className="flex items-center gap-1 text-[11px] text-muted"><input type="checkbox" checked={subtitles} onChange={(e) => setSubtitles(e.target.checked)} className="h-4 w-4 accent-[var(--accent-2)]" />con letra</label>
+            )}
+            {providerSelect}
+            <button onClick={start} disabled={busy} className="rounded-md border border-border px-2 py-1 text-[11px] text-muted hover:text-fg disabled:opacity-40">{busy ? "Enviando…" : "Regenerar"}</button>
+            {scenes.length > 0 && <span className="text-[11px] text-muted">{scenes.length} escenas{cost}</span>}
+          </div>
+        </div>
+      ) : status === "queued" || status === "rendering" ? (
+        <div className="flex flex-col gap-1">
+          <p className="text-fg">{song.videoProgress || "🎬 En cola"}</p>
+          <p className="text-[11px] text-muted">Unos {minutes} min: una imagen por sección con el mismo personaje, luego el montaje.{song.videoProgress?.includes("OpenAI") ? "" : " Con imágenes locales, si el servicio pide memoria, apaga el motor o la voz."}</p>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-3">
+          <span>
+            <span className="block text-fg">{status === "failed" ? "El último intento falló" : "Crear video de imágenes"}</span>
+            <span className="block text-[11px] text-muted">{status === "failed" ? song.videoError : `Guion visual con Ollama en el estilo del artista, una imagen por sección con el mismo personaje, movimiento de cámara y cortes al compás · ~${minutes} min${cost}`}</span>
+          </span>
+          <span className="flex shrink-0 items-center gap-2">
+            {providerSelect}
+            {!song.instrumental && (
+              <label className="flex items-center gap-1 text-[11px] text-muted" title="Letra sincronizada con la voz, resaltada palabra a palabra"><input type="checkbox" checked={subtitles} onChange={(e) => setSubtitles(e.target.checked)} className="h-4 w-4 accent-[var(--accent-2)]" />con letra</label>
+            )}
+            <button onClick={start} disabled={busy} className="rounded-md border border-accent-2/60 px-2.5 py-1 text-[11px] text-fg hover:bg-accent-2/20 disabled:opacity-40">{busy ? "Escribiendo guion…" : status === "failed" ? "Reintentar" : "Crear video"}</button>
+          </span>
+        </div>
+      )}
+      {err && <p className="mt-1 text-red-300">{err}</p>}
     </div>
   );
 }

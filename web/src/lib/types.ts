@@ -15,6 +15,7 @@ export type EngineStatus = {
   engine: { online: boolean; version: string | null; models: { name: string; is_default?: boolean }[]; defaultModel: string | null };
   ollama: { online: boolean; model: string | null };
   voice: { online: boolean; device: string | null; modelsLoaded: boolean };
+  video?: { online: boolean; device: string | null; freeGb: number | null; busy: boolean };
 };
 
 export const LANGUAGES: { code: string; label: string }[] = [

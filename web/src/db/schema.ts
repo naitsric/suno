@@ -34,6 +34,14 @@ export const songs = sqliteTable("songs", {
   voiceJobId: text("voice_job_id"),
   /** Pitch-correct the sung voice during conversion (Seed-VC follows a tuned F0 curve). */
   autotune: integer("autotune", { mode: "boolean" }).notNull().default(false),
+  /** Stills video (sequence of Pixar-style images + Ken Burns): none | queued | rendering | done | failed. */
+  videoStatus: text("video_status").notNull().default("none"),
+  videoJobId: text("video_job_id"),
+  videoFile: text("video_file"),
+  videoProgress: text("video_progress").notNull().default(""),
+  videoError: text("video_error"),
+  /** Storyboard sent to the video service (JSON: character + scenes with prompt/duration/section). */
+  storyboard: text("storyboard"),
   bpm: integer("bpm"),
   keyScale: text("key_scale"),
   timeSignature: text("time_signature"),
@@ -79,6 +87,9 @@ export const artists = sqliteTable("artists", {
   description: text("description").notNull().default(""),
   vocalLanguage: text("vocal_language").notNull().default("es"),
   defaultVoiceId: text("default_voice_id"),
+  /** Portrait generated with the OpenAI image API from `imagePrompt` (file under data/images/artists). */
+  imageFile: text("image_file"),
+  imagePrompt: text("image_prompt"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -86,6 +97,9 @@ export const albums = sqliteTable("albums", {
   id: text("id").primaryKey(),
   artistId: text("artist_id").notNull(),
   name: text("name").notNull(),
+  /** Cover generated with the OpenAI image API from `imagePrompt` (file under data/images/albums). */
+  imageFile: text("image_file"),
+  imagePrompt: text("image_prompt"),
   createdAt: integer("created_at").notNull(),
 });
 

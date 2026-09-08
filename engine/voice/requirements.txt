@@ -18,3 +18,5 @@ uvicorn[standard]
 python-multipart
 omegaconf==2.3.0
 audio-separator[cpu]  # UVR models (DeEcho-DeReverb) for reference cleanup
+faster-whisper  # lyric alignment for on-screen lyrics
+yt-dlp  # downloads the audio of a YouTube reference for /reference-analysis

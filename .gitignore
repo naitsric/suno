@@ -18,3 +18,8 @@ web/data/
 *.log
 __pycache__/
 *.pyc
+engine/video/.venv/
+engine/video/stills/.cache/
+engine/video/stills/cache/
+engine/video/poc/out/
+engine/video/poc/cache/

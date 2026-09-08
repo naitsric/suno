@@ -12,7 +12,8 @@ import { buildStoryboard } from "./storyboard";
 import { masterAudio, type MasterPreset } from "./master";
 import { analyzeVoice, getVoice, voiceKind, voicePath, voiceProfile, voiceRegister } from "./voices";
 import { applyGender, applyRegister, genderInStyle, voiceBrief, voicePromptTags, type Register } from "./voice-register";
-import { getAlbum, getArtist } from "./artists";
+import { artistImagePath, getAlbum, getArtist } from "./artists";
+import { generateImage, generateImageWithReference, openaiConfigured } from "./openai-images";
 
 const PORTRAITS_DIR = process.env.PORTRAITS_DIR ?? "./data/portraits";
 
@@ -34,6 +35,9 @@ export type CreateSongInput = {
   master?: MasterPreset;
   artistId?: string | null;
   albumId?: string | null;
+  /** Fixed tempo/key (e.g. measured on a YouTube reference); otherwise the engine's LM picks them. */
+  bpm?: number | null;
+  keyScale?: string | null;
 };
 
 function now() {
@@ -108,6 +112,8 @@ export async function createSong(input: CreateSongInput): Promise<Song[]> {
     ? { prompt: "", lyrics: "", sample_query: sampleQuery, thinking: true, audio_duration: input.duration ?? null, vocal_language: input.vocalLanguage, model: input.model ?? null }
     : { prompt: style, lyrics, audio_duration: input.duration ?? null, vocal_language: input.vocalLanguage, model: input.model ?? null };
   params.batch_size = VARIANTS;
+  if (input.bpm) params.bpm = input.bpm;
+  if (input.keyScale) params.key_scale = input.keyScale;
 
   const task = await engine.releaseTask(params);
   const ts = now();
@@ -180,11 +186,15 @@ export async function syncPending(): Promise<void> {
  * Stills video for a finished song: Ollama writes the storyboard (one Pixar scene per section), the video
  * service renders the images with a consistent character and assembles a Ken Burns slideshow on the song.
  */
-export async function startVideo(id: string, opts: { subtitles?: boolean } = {}): Promise<Song> {
+export type VideoProvider = "openai" | "local";
+
+export async function startVideo(id: string, opts: { subtitles?: boolean; provider?: VideoProvider } = {}): Promise<Song> {
   const song = getSong(id);
   if (!song) throw new Error("No existe");
   if (song.status !== "done" || !song.audioFile) throw new Error("La canción aún no está lista");
   if (song.videoStatus === "queued" || song.videoStatus === "rendering") throw new Error("Ya hay un video en marcha para esta canción");
+  const provider: VideoProvider = opts.provider ?? (openaiConfigured() ? "openai" : "local");
+  if (provider === "openai" && !openaiConfigured()) throw new Error("Falta OPENAI_API_KEY para generar las imágenes con OpenAI");
   if (!(await video.health())) throw new Error("El servicio de video está apagado: ejecuta make video");
   db.update(songs).set({ videoStatus: "queued", videoProgress: "Escribiendo el guion visual", videoError: null, videoJobId: null, updatedAt: now() }).where(eq(songs.id, id)).run();
   try {
@@ -200,10 +210,22 @@ export async function startVideo(id: string, opts: { subtitles?: boolean } = {})
         console.warn(`[video] sin letra en pantalla para ${id}: ${err instanceof Error ? err.message : err}`);
       }
     }
+    const artist = song.artistId ? getArtist(song.artistId) ?? null : null;
+    db.update(songs).set({ storyboard: JSON.stringify(storyboard), updatedAt: now() }).where(eq(songs.id, id)).run();
+    if (provider === "openai") {
+      // Scenes come from gpt-image-1; the artist's portrait (or the first scene) is the identity reference.
+      db.update(songs).set({ videoStatus: "rendering", videoProgress: `🎬 Imagen 1 de ${storyboard.scenes.length} (OpenAI)`, updatedAt: now() }).where(eq(songs.id, id)).run();
+      const portrait = artist ? artistImagePath(artist) : null;
+      void renderScenesWithOpenAI(id, storyboard, portrait && fs.existsSync(portrait) ? portrait : null).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        db.update(songs).set({ videoStatus: "failed", videoError: msg.slice(0, 500), videoProgress: "", updatedAt: now() }).where(eq(songs.id, id)).run();
+      });
+      return getSong(id)!;
+    }
     const reference = song.artistId ? path.join(PORTRAITS_DIR, `${song.artistId}.png`) : null;
     const job = await video.submitVideo(path.join(AUDIO_DIR, song.audioFile), storyboard, { referencePath: reference });
     db.update(songs)
-      .set({ storyboard: JSON.stringify(storyboard), videoJobId: job.job_id, videoProgress: `🎬 En cola (#${job.queue_position})`, updatedAt: now() })
+      .set({ videoJobId: job.job_id, videoProgress: `🎬 En cola (#${job.queue_position})`, updatedAt: now() })
       .where(eq(songs.id, id))
       .run();
   } catch (err) {
@@ -212,6 +234,36 @@ export async function startVideo(id: string, opts: { subtitles?: boolean } = {})
     throw err;
   }
   return getSong(id)!;
+}
+
+const SCENES_DIR = process.env.VIDEO_SCENES_DIR ?? "./data/video-scenes";
+
+/**
+ * Generates every scene with OpenAI (sequentially, ~20 s each), keeping the protagonist consistent by passing
+ * the artist portrait or the first scene as reference, then hands the images to the video service for the
+ * assembly. Runs detached from the request; progress and failures land in the song row.
+ */
+async function renderScenesWithOpenAI(songId: string, storyboard: video.Storyboard, portraitPath: string | null): Promise<void> {
+  const dir = path.join(SCENES_DIR, songId);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const references: Buffer[] = portraitPath ? [fs.readFileSync(portraitPath)] : [];
+  const paths: string[] = [];
+  for (let i = 0; i < storyboard.scenes.length; i++) {
+    const scene = storyboard.scenes[i];
+    const prompt = `${storyboard.style}. ${storyboard.character}. ${scene.prompt}. Same protagonist as the reference image${references.length ? "" : " (none yet)"}, consistent look; no text, no letters, no logos, 3:2 landscape.`;
+    db.update(songs).set({ videoProgress: `🎬 Imagen ${i + 1} de ${storyboard.scenes.length} (OpenAI)`, updatedAt: now() }).where(eq(songs.id, songId)).run();
+    const png = references.length ? await generateImageWithReference(prompt, references, { size: "1536x1024", quality: "medium" }) : await generateImage(prompt, { size: "1536x1024", quality: "medium" });
+    const file = path.join(dir, `scene_${String(i + 1).padStart(2, "0")}.png`);
+    fs.writeFileSync(file, png);
+    paths.push(file);
+    if (references.length === 0) references.push(png); // the first scene anchors the rest
+  }
+  const song = getSong(songId);
+  if (!song?.audioFile) throw new Error("La canción desapareció durante el render");
+  db.update(songs).set({ videoProgress: "🎬 Montando el video", updatedAt: now() }).where(eq(songs.id, songId)).run();
+  const job = await video.submitVideo(path.join(AUDIO_DIR, song.audioFile), storyboard, { imagePaths: paths });
+  db.update(songs).set({ videoJobId: job.job_id, videoStatus: "rendering", updatedAt: now() }).where(eq(songs.id, songId)).run();
 }
 
 async function syncVideos(): Promise<void> {

@@ -20,6 +20,9 @@ const CreateSchema = z.object({
   master: z.enum(MASTER_PRESETS).default("off"),
   artistId: z.string().nullable().optional(),
   albumId: z.string().nullable().optional(),
+  /** Measured on a reference song: passed to the engine as fixed metadata instead of letting its LM guess. */
+  bpm: z.number().int().min(30).max(300).nullable().optional(),
+  keyScale: z.string().max(20).nullable().optional(),
 });
 
 /** `?artist=<id>` filters by artist, `?artist=none` lists songs without artist. */

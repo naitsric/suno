@@ -13,7 +13,7 @@ SEEDVC_REPO := https://github.com/Plachtaa/seed-vc.git
 APOLLO_REPO := https://github.com/JusperLee/Apollo.git
 
 .DEFAULT_GOAL := help
-.PHONY: help setup setup-engine setup-voice setup-web engine voice web dev check clean-audio
+.PHONY: help setup setup-engine setup-voice setup-web engine voice web dev check clean-audio video
 
 ## help: lista de targets
 help:
@@ -64,6 +64,10 @@ engine: setup-engine
 ## voice: arranca el servicio de conversión de voz (http://127.0.0.1:8002)
 voice: setup-voice
 	./$(VOICE_DIR)/run.sh
+
+## video: arranca el servicio de video de imágenes (http://127.0.0.1:8003), necesita engine/video/.venv
+video:
+	./engine/video/stills/run.sh
 
 ## web: arranca la app web (http://localhost:$(PORT))
 web: setup-web

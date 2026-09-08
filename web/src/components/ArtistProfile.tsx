@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import VoicePanel from "./VoicePanel";
+import ImageGenerator from "./ImageGenerator";
 import { LANGUAGES, type ArtistDTO, type VoiceDTO } from "@/lib/types";
 
 export default function ArtistProfile({ artist, voices, onUpdated, onDeleted, onVoicesChanged, onError, onUseStyle }: { artist: ArtistDTO; voices: VoiceDTO[]; onUpdated: (a: ArtistDTO) => void; onDeleted: (id: string) => void; onVoicesChanged: () => void; onError: (e: string | null) => void; onUseStyle?: (style: string, genre: string, brief: string) => void }) {
@@ -67,6 +68,22 @@ export default function ArtistProfile({ artist, voices, onUpdated, onDeleted, on
         <button onClick={() => patch({ name, style, description, vocalLanguage: language })} disabled={!dirty || saving} className="self-start rounded-lg bg-accent-2 px-4 py-2 text-sm font-medium text-white disabled:opacity-40">
           {saving ? "Guardando…" : "Guardar perfil"}
         </button>
+      </section>
+
+      <section className="border-t border-border pt-4">
+        <div className="mb-3 flex items-baseline justify-between">
+          <h3 className="text-xs font-medium uppercase tracking-wide text-muted">Imagen de {artist.name}</h3>
+          <span className="text-[11px] text-muted">OpenAI gpt-image-1</span>
+        </div>
+        <ImageGenerator
+          key={artist.id}
+          kind="artist"
+          id={artist.id}
+          imageUrl={artist.imageFile ? `/api/artists/${artist.id}/image?v=${encodeURIComponent(artist.imageFile)}` : null}
+          placeholder={artist.emoji}
+          onGenerated={(a) => onUpdated({ ...artist, ...(a as Partial<ArtistDTO>) })}
+          onError={onError}
+        />
       </section>
 
       <section className="border-t border-border pt-4">

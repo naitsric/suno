@@ -28,9 +28,12 @@ export default function ArtistRail({ artists, scope, unassigned, onSelect, onCre
     }
   };
 
-  const item = (active: boolean, onClick: () => void, icon: string, label: string, sub?: string) => (
+  const item = (active: boolean, onClick: () => void, icon: string, label: string, sub?: string, image?: string | null) => (
     <button onClick={onClick} className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition ${active ? "bg-panel-2 text-fg" : "text-muted hover:bg-panel hover:text-fg"}`}>
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-panel text-base">{icon}</span>
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md bg-panel text-base">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        {image ? <img src={image} alt="" className="h-full w-full object-cover" /> : icon}
+      </span>
       <span className="min-w-0">
         <span className="block truncate text-sm">{label}</span>
         {sub && <span className="block truncate text-[11px] text-muted">{sub}</span>}
@@ -43,7 +46,7 @@ export default function ArtistRail({ artists, scope, unassigned, onSelect, onCre
       <p className="px-2.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted">Artistas</p>
       {artists.map((a) => (
         <div key={a.id}>
-          {item(scope.kind === "artist" && scope.id === a.id, () => onSelect({ kind: "artist", id: a.id }), a.emoji, a.name, [`${a.songCount} canciones`, a.albumCount ? `${a.albumCount} álbumes` : null, a.voiceCount ? "🎤 voz" : null].filter(Boolean).join(" · "))}
+          {item(scope.kind === "artist" && scope.id === a.id, () => onSelect({ kind: "artist", id: a.id }), a.emoji, a.name, [`${a.songCount} canciones`, a.albumCount ? `${a.albumCount} álbumes` : null, a.voiceCount ? "🎤 voz" : null].filter(Boolean).join(" · "), a.imageFile ? `/api/artists/${a.id}/image?v=${encodeURIComponent(a.imageFile)}` : null)}
         </div>
       ))}
       {artists.length === 0 && !creating && <p className="px-2.5 py-2 text-xs text-muted">Crea un artista para organizar voces, estilos y álbumes.</p>}

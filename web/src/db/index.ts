@@ -90,6 +90,12 @@ function ensureSchema(sqlite: Database.Database) {
     ["edit_op", "edit_op TEXT"],
     ["edit_instruction", "edit_instruction TEXT"],
     ["autotune", "autotune INTEGER NOT NULL DEFAULT 0"],
+    ["video_status", "video_status TEXT NOT NULL DEFAULT 'none'"],
+    ["video_job_id", "video_job_id TEXT"],
+    ["video_file", "video_file TEXT"],
+    ["video_progress", "video_progress TEXT NOT NULL DEFAULT ''"],
+    ["video_error", "video_error TEXT"],
+    ["storyboard", "storyboard TEXT"],
   ] as const) {
     if (!cols.has(col)) sqlite.exec(`ALTER TABLE songs ADD COLUMN ${ddl}`);
   }
@@ -107,6 +113,11 @@ function ensureSchema(sqlite: Database.Database) {
     ["source_song_id", "source_song_id TEXT"],
   ] as const) {
     if (!voiceCols.has(col)) sqlite.exec(`ALTER TABLE voices ADD COLUMN ${ddl}`);
+  }
+  for (const table of ["artists", "albums"]) {
+    const cols = new Set((sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+    if (!cols.has("image_file")) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN image_file TEXT`);
+    if (!cols.has("image_prompt")) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN image_prompt TEXT`);
   }
   sqlite.exec("CREATE INDEX IF NOT EXISTS songs_artist ON songs(artist_id)");
   // Songs generated before post-production existed were never processed.

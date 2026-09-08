@@ -251,6 +251,7 @@ function StatusPills({ status }: { status: EngineStatus | null }) {
       {pill(!!status?.engine.online, status?.engine.online ? `Motor · ${status.engine.defaultModel ?? "ACE-Step"}` : "Motor apagado", "ACE-Step API en :8001 (make engine)")}
       {pill(!!status?.ollama.online, status?.ollama.online ? `Letras · ${status.ollama.model ?? "Ollama"}` : "Letras · Ollama apagado", "Ollama para escribir letras en modo simple")}
       {pill(!!status?.voice.online, status?.voice.online ? "Voz · listo" : "Voz · apagado", "Servicio de conversión de voz y realce en :8002 (make voice)")}
+      {pill(!!status?.video?.online, status?.video?.online ? `Video · ${status.video.busy ? "renderizando" : "listo"}` : "Video · apagado", "Servicio de video de imágenes (Pixar stills) en :8003 (make video)")}
     </div>
   );
 }

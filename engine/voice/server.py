@@ -16,7 +16,12 @@ REST API (port 8002):
                            as a *sung* reference voice (a synthetic singer that stays the same across songs)
   POST /clean-reference    multipart: audio → WAV: reference denoised (Demucs vocal stem) + de-reverb (UVR DeEcho-DeReverb)
                            + speech chain (HPF, de-ess, EQ, comp, loudnorm)
+  POST /align-lyrics       multipart: audio (song), lyrics (text), [language], [model] → line/word timings of the lyrics
+                           (Demucs vocal stem → faster-whisper word timestamps → aligned to the known lyrics)
   POST /enhance            multipart: audio → WAV restored with Apollo (band-split music restoration)
+  POST /reference-analysis multipart: url (YouTube) | audio, [token] → JSON: what the song sounds like (tempo, key,
+                           energy, structure, stems, vocals + language, CLAP genre/mood/instrument tags); see reference.py
+  GET  /reference-analysis/{token} -> {stage} while an analysis with that token runs
   POST /convert            multipart: song (audio), reference (audio), [pitch_shift], [diffusion_steps], [auto_octave],
                            [autotune], [autotune_strength], [key_scale]  (autotune = the song's F0 is snapped to
                            the nearest scale note before conditioning Seed-VC, so the sung pitch comes out in tune)
@@ -829,6 +834,158 @@ def extract_reference(audio: UploadFile = File(...), seconds: float = Form(30.0)
     return Response(content=data, media_type="audio/wav", headers={"X-Extract-Info": json.dumps(info)})
 
 
+# ---------------------------------------------------------------------------------------------------
+# Lyrics alignment (for on-screen lyrics / karaoke in the videos)
+# ---------------------------------------------------------------------------------------------------
+_whisper = None
+_whisper_name = ""
+
+
+def load_whisper(name: str):
+    global _whisper, _whisper_name
+    if _whisper is None or _whisper_name != name:
+        from faster_whisper import WhisperModel
+
+        print(f"[voice] loading faster-whisper {name}...", flush=True)
+        _whisper = WhisperModel(name, device="cpu", compute_type="int8")
+        _whisper_name = name
+    return _whisper
+
+
+def _norm_token(w: str) -> str:
+    import unicodedata
+
+    w = unicodedata.normalize("NFD", w.lower())
+    w = "".join(c for c in w if unicodedata.category(c) != "Mn")
+    return re.sub(r"[^a-z0-9ñ]+", "", w)
+
+
+def align_lyrics(vocals_wav: Path, lyrics: str, language: str = "es", model: str = "medium", duration: float = 0.0) -> dict:
+    """Times each lyric line (and word) against the sung vocals.
+    1. faster-whisper transcribes the vocal stem with word timestamps (singing is noisy: we never trust
+       the words themselves, only their times).
+    2. The transcribed words are aligned to the known lyrics (difflib on normalised tokens); matched words
+       anchor the timeline, the rest is interpolated between anchors so every line and word gets a time.
+    Returns {"lines": [{"text", "start", "end", "words": [{"text","start","end"}], "matched"}], "confidence"}."""
+    import difflib
+
+    wm = load_whisper(model)
+    # The lyrics as prompt bias the decoder toward the real words (singing is otherwise half-heard).
+    prompt = " ".join(ln.strip() for ln in lyrics.splitlines() if ln.strip() and not ln.strip().startswith("["))[:600]
+    segments, _info = wm.transcribe(str(vocals_wav), language=language, word_timestamps=True, vad_filter=True, beam_size=5, condition_on_previous_text=False, initial_prompt=prompt)
+    heard: list[tuple[str, float, float]] = []
+    for seg in segments:
+        for w in seg.words or []:
+            tok = _norm_token(w.word)
+            if tok:
+                heard.append((tok, float(w.start), float(w.end)))
+    lines_raw = [ln.strip() for ln in lyrics.splitlines()]
+    lines = [ln for ln in lines_raw if ln and not re.match(r"^\[.*\]$", ln)]
+    words: list[dict] = []  # flat list of lyric words with (line index)
+    for li, ln in enumerate(lines):
+        for raw in ln.split():
+            tok = _norm_token(raw)
+            if tok:
+                words.append({"text": raw, "tok": tok, "line": li, "start": None, "end": None})
+    if not words or not heard:
+        raise ValueError("No hay letra o no se detectó voz cantada")
+    sm = difflib.SequenceMatcher(None, [w["tok"] for w in words], [h[0] for h in heard], autojunk=False)
+    matched = 0
+    # Only runs of >= 2 consecutive matching words anchor the timeline: a lone word ("herida") matched to the
+    # wrong repetition of a chorus dragged whole lines 30 s off.
+    for a, b, n in sm.get_matching_blocks():
+        if n < 2:
+            continue
+        for k in range(n):
+            words[a + k]["start"], words[a + k]["end"] = heard[b + k][1], heard[b + k][2]
+            matched += 1
+    # Drop anchors that break monotonic time (an anchor later in the lyrics must not be earlier in the audio).
+    last = -1.0
+    for w in words:
+        if w["start"] is None:
+            continue
+        if w["start"] < last - 0.2:
+            w["start"] = w["end"] = None
+            matched -= 1
+        else:
+            last = w["end"]
+    confidence = matched / len(words)
+    # interpolate unmatched words between the nearest anchors (monotonic timeline)
+    anchors = [i for i, w in enumerate(words) if w["start"] is not None]
+    if not anchors:
+        raise ValueError("La letra no coincide con lo que se oye")
+    total_end = max(duration - 0.5, max(h[2] for h in heard)) if duration else max(h[2] for h in heard)
+    for i, w in enumerate(words):
+        if w["start"] is not None:
+            continue
+        prev = max((a for a in anchors if a < i), default=None)
+        nxt = min((a for a in anchors if a > i), default=None)
+        t0 = words[prev]["end"] if prev is not None else 0.0
+        t1 = words[nxt]["start"] if nxt is not None else min(total_end, t0 + 0.45 * (len(words) - (prev if prev is not None else 0)))
+        span_lo = (prev + 1) if prev is not None else 0
+        span_hi = (nxt - 1) if nxt is not None else len(words) - 1
+        cnt = span_hi - span_lo + 1
+        slot = (t1 - t0) / max(cnt, 1)
+        w["start"], w["end"] = t0 + slot * (i - span_lo), t0 + slot * (i - span_lo + 1)
+    # monotonic + minimum durations
+    t = 0.0
+    for w in words:
+        w["start"] = max(w["start"], t)
+        w["end"] = max(w["end"], w["start"] + 0.12)
+        t = w["end"]
+    out_lines = []
+    for li, ln in enumerate(lines):
+        ws = [w for w in words if w["line"] == li]
+        if not ws:
+            continue
+        # A sung line rarely exceeds ~0.9 s per word; longer spans are a gap before the next anchor.
+        cap = ws[0]["start"] + max(2.5, 0.9 * len(ws) + 1.0)
+        if ws[-1]["end"] > cap:
+            span = cap - ws[0]["start"]
+            slot = span / len(ws)
+            for k, w in enumerate(ws):
+                w["start"], w["end"] = ws[0]["start"] + slot * k, ws[0]["start"] + slot * (k + 1)
+        out_lines.append({
+            "text": ln,
+            "start": round(ws[0]["start"], 3),
+            "end": round(ws[-1]["end"], 3),
+            "matched": round(sum(1 for w in ws if w.get("tok") and any(h[0] == w["tok"] for h in heard)) / len(ws), 2),
+            "words": [{"text": w["text"], "start": round(w["start"], 3), "end": round(w["end"], 3)} for w in ws],
+        })
+    # lines must not overlap; a line ends at the latest just before the next one starts
+    for a, b in zip(out_lines, out_lines[1:]):
+        if a["end"] > b["start"]:
+            a["end"] = max(a["start"] + 0.3, b["start"] - 0.05)
+    return {"lines": out_lines, "confidence": round(confidence, 3), "heard_words": len(heard), "lyric_words": len(words)}
+
+
+@app.post("/align-lyrics")
+def align_lyrics_endpoint(audio: UploadFile = File(...), lyrics: str = Form(...), language: str = Form("es"), model: str = Form("medium"), duration: float = Form(0.0)):
+    job_dir = WORK_DIR / f"align-{uuid.uuid4()}"
+    job_dir.mkdir(parents=True)
+    src = job_dir / f"upload{Path(audio.filename or 'song.mp3').suffix or '.mp3'}"
+    with src.open("wb") as f:
+        shutil.copyfileobj(audio.file, f)
+    try:
+        song = job_dir / "song44.wav"
+        ffmpeg("-i", str(src), "-ac", "2", "-ar", str(SR), str(song))
+        load_models()
+        with _gpu_lock:
+            vocals, _ = separate(song, job_dir)
+            mono = job_dir / "vocals16.wav"
+            ffmpeg("-i", str(vocals), "-ac", "1", "-ar", "16000", str(mono))
+            return align_lyrics(mono, lyrics, language, model if model in ("tiny", "base", "small", "medium") else "medium", duration)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
 @app.post("/clean-reference")
 def clean_reference(audio: UploadFile = File(...)):
     """Returns the cleaned reference as WAV (mono 44.1 kHz); stats in the X-Clean-Info header (JSON)."""
@@ -881,6 +1038,54 @@ def enhance(audio: UploadFile = File(...)):
     from fastapi.responses import Response
 
     return Response(content=data, media_type="audio/wav")
+
+
+_reference_progress: dict[str, str] = {}
+
+
+@app.post("/reference-analysis")
+def reference_analysis(url: str = Form(""), audio: Optional[UploadFile] = File(None), token: str = Form("")):
+    """Measures a reference song (YouTube URL or uploaded audio) so the web can write a style prompt from
+    it. Heavy part (Demucs + CLAP) runs under the GPU lock; ~1-3 min per song."""
+    import reference
+
+    if not url and audio is None:
+        raise HTTPException(422, "Falta la URL o el audio")
+    job_dir = WORK_DIR / f"reference-{uuid.uuid4()}"
+    job_dir.mkdir(parents=True)
+    key = token or job_dir.name
+
+    def progress(stage: str) -> None:
+        _reference_progress[key] = stage
+        print(f"[reference] {stage}", flush=True)
+
+    try:
+        if audio is not None:
+            source = job_dir / f"upload{Path(audio.filename or 'in.mp3').suffix or '.mp3'}"
+            with source.open("wb") as f:
+                shutil.copyfileobj(audio.file, f)
+            source = str(source)
+        else:
+            source = url.strip()
+        progress("En cola: esperando la GPU" if _gpu_lock.locked() else "Preparando")
+        with _gpu_lock:
+            _, sep = load_models()
+            return reference.analyze_reference_source(source, job_dir, sep, DEVICE, progress)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        _reference_progress.pop(key, None)
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
+@app.get("/reference-analysis/{token}")
+def reference_progress(token: str):
+    return {"stage": _reference_progress.get(token)}
 
 
 @app.post("/convert")
