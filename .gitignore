@@ -1,0 +1,20 @@
+# engine (cloned + models live here, never commit)
+engine/ACE-Step-1.5/
+engine/.env
+engine/voice/seed-vc/
+engine/voice/Apollo/
+engine/voice/.venv/
+engine/voice/.cache/
+
+# web
+web/node_modules/
+web/.next/
+web/out/
+web/next-env.d.ts
+web/.env.local
+web/data/
+
+.DS_Store
+*.log
+__pycache__/
+*.pyc

@@ -1,0 +1,438 @@
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { db } from "@/db";
+import { songs, type Song } from "@/db/schema";
+import * as engine from "./acestep";
+import { draftSong, ollamaAvailable, planEdit, type EditPlan } from "./ollama";
+import * as voice from "./voice";
+import { masterAudio, type MasterPreset } from "./master";
+import { analyzeVoice, getVoice, voiceKind, voicePath, voiceProfile, voiceRegister } from "./voices";
+import { applyGender, applyRegister, genderInStyle, voiceBrief, voicePromptTags, type Register } from "./voice-register";
+import { getAlbum, getArtist } from "./artists";
+
+const AUDIO_DIR = process.env.AUDIO_DIR ?? "./data/audio";
+const VARIANTS = 2;
+
+export type CreateSongInput = {
+  mode: "simple" | "custom";
+  title?: string;
+  description?: string;
+  style?: string;
+  lyrics?: string;
+  instrumental: boolean;
+  duration?: number | null;
+  vocalLanguage: string;
+  model?: string | null;
+  voiceId?: string | null;
+  autotune?: boolean;
+  master?: MasterPreset;
+  artistId?: string | null;
+  albumId?: string | null;
+};
+
+function now() {
+  return Date.now();
+}
+
+function titleFrom(text: string) {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > 48 ? `${clean.slice(0, 45)}…` : clean || "Sin título";
+}
+
+/** Builds the engine request, submits it and stores one row per expected variant. */
+export async function createSong(input: CreateSongInput): Promise<Song[]> {
+  let title = input.title?.trim() ?? "";
+  let style = input.style?.trim() ?? "";
+  let lyrics = input.lyrics?.trim() ?? "";
+  const description = input.description?.trim() ?? "";
+  let sampleQuery: string | undefined;
+
+  // Singing with a voice profile: write the music in that voice's register so the melody lands where
+  // the reference recording lives (the conversion breaks when the melody sits far above it).
+  let register: Register | null = null;
+  let voiceTags = "";
+  let brief: string | null = null;
+  if (input.voiceId && !input.instrumental) {
+    let v = getVoice(input.voiceId);
+    if (!v) throw new Error("La voz seleccionada ya no existe.");
+    if (v.profile === null) v = await analyzeVoice(v);
+    register = voiceRegister(v);
+    if (register) {
+      const profile = voiceProfile(v);
+      voiceTags = voicePromptTags(register, profile);
+      brief = voiceBrief(register, profile);
+    }
+  }
+  // No voice profile: at least keep the vocal gender the artist declares in their style.
+  const artistGender = !register && input.artistId && !input.instrumental ? genderInStyle(getArtist(input.artistId)?.style ?? "") : null;
+  if (artistGender && !brief) brief = artistGender === "female" ? "voz femenina (usa 'female vocals' en el estilo, nunca 'male vocals')" : "voz masculina (usa 'male vocals' en el estilo, nunca 'female vocals')";
+
+  if (input.mode === "simple") {
+    if (!description) throw new Error("Describe la canción que quieres.");
+    if (await ollamaAvailable()) {
+      const draft = await draftSong({ description, language: input.vocalLanguage, instrumental: input.instrumental, voice: brief });
+      title ||= draft.title;
+      style ||= draft.style;
+      lyrics = draft.lyrics;
+    } else {
+      // Fall back to ACE-Step's own LM planner (needs ACESTEP_INIT_LLM=true).
+      sampleQuery = input.instrumental ? `${description} (instrumental, no vocals)` : register ? `${description} (${voiceTags})` : description;
+      title ||= titleFrom(description);
+    }
+  } else {
+    if (!style) throw new Error("Indica el estilo de la canción.");
+    if (input.instrumental) lyrics = "[Instrumental]";
+    if (!lyrics) throw new Error("Escribe la letra o marca instrumental.");
+    title ||= titleFrom(lyrics.split("\n").find((l) => l && !l.startsWith("[")) ?? style);
+  }
+
+  if (register && !sampleQuery) style = applyRegister(style, register, voiceTags);
+  else if (artistGender && !sampleQuery) style = applyGender(style, artistGender);
+  else if (artistGender && sampleQuery) sampleQuery += ` (${artistGender} vocals)`;
+  if (input.albumId) {
+    const album = getAlbum(input.albumId);
+    if (!album || album.artistId !== input.artistId) throw new Error("El álbum no pertenece a ese artista.");
+  }
+  if (input.instrumental) {
+    lyrics = "[Instrumental]";
+    if (style && !/instrumental/i.test(style)) style = `${style}, instrumental`;
+  }
+
+  const params: engine.GenerateParams = sampleQuery
+    ? { prompt: "", lyrics: "", sample_query: sampleQuery, thinking: true, audio_duration: input.duration ?? null, vocal_language: input.vocalLanguage, model: input.model ?? null }
+    : { prompt: style, lyrics, audio_duration: input.duration ?? null, vocal_language: input.vocalLanguage, model: input.model ?? null };
+  params.batch_size = VARIANTS;
+
+  const task = await engine.releaseTask(params);
+  const ts = now();
+  const rows = Array.from({ length: VARIANTS }, (_, variant) => ({
+    id: randomUUID(),
+    taskId: task.task_id,
+    variant,
+    title,
+    mode: input.mode,
+    description,
+    style,
+    lyrics,
+    instrumental: input.instrumental,
+    duration: input.duration ?? null,
+    vocalLanguage: input.vocalLanguage,
+    model: input.model ?? null,
+    voiceId: input.instrumental ? null : input.voiceId ?? null,
+    autotune: !!input.autotune && !input.instrumental && !!input.voiceId,
+    masterPreset: input.master ?? "off",
+    artistId: input.artistId ?? null,
+    albumId: input.albumId ?? null,
+    status: "queued" as const,
+    progress: task.queue_position ? `En cola (#${task.queue_position})` : "En cola",
+    createdAt: ts,
+    updatedAt: ts,
+  }));
+  db.insert(songs).values(rows).run();
+  return db.select().from(songs).where(eq(songs.taskId, task.task_id)).orderBy(songs.variant).all();
+}
+
+export function listSongs(filter: { artistId?: string | null } = {}): Song[] {
+  const q = db.select().from(songs);
+  const where = filter.artistId === undefined ? undefined : filter.artistId === null ? isNull(songs.artistId) : eq(songs.artistId, filter.artistId);
+  return (where ? q.where(where) : q).orderBy(desc(songs.createdAt), songs.variant).all();
+}
+
+export function updateSongMeta(id: string, patch: { title?: string }) {
+  if (!getSong(id)) throw new Error("No existe");
+  db.update(songs).set({ ...(patch.title !== undefined ? { title: patch.title.trim() || "Sin título" } : {}), updatedAt: now() }).where(eq(songs.id, id)).run();
+  return getSong(id)!;
+}
+
+export function getSong(id: string): Song | undefined {
+  return db.select().from(songs).where(eq(songs.id, id)).get();
+}
+
+export function deleteSong(id: string) {
+  const song = getSong(id);
+  if (!song) return false;
+  for (const f of [song.audioFile, song.originalAudioFile, song.rawAudioFile, `${song.id}.raw.mp3`, `${song.id}.voice.raw.mp3`]) {
+    if (f) fs.rmSync(path.join(AUDIO_DIR, f), { force: true });
+  }
+  db.delete(songs).where(eq(songs.id, id)).run();
+  return true;
+}
+
+export function audioPathFor(song: Song, original = false) {
+  const f = original ? song.originalAudioFile : song.audioFile;
+  return f ? path.join(AUDIO_DIR, f) : null;
+}
+
+/** Polls the engine and the voice service for every unfinished song and persists results/audio. */
+export async function syncPending(): Promise<void> {
+  await syncGeneration();
+  await syncVoiceConversion();
+}
+
+async function syncGeneration(): Promise<void> {
+  const pending = db
+    .select()
+    .from(songs)
+    .where(inArray(songs.status, ["queued", "generating"]))
+    .all();
+  if (pending.length === 0) return;
+
+  const taskIds = [...new Set(pending.map((s) => s.taskId).filter((t): t is string => !!t))];
+  let results: engine.TaskStatus[];
+  try {
+    results = await engine.queryResults(taskIds);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    for (const s of pending) {
+      db.update(songs).set({ progress: `Motor no disponible: ${msg}`, updatedAt: now() }).where(eq(songs.id, s.id)).run();
+    }
+    return;
+  }
+
+  for (const task of results) {
+    const rows = pending.filter((s) => s.taskId === task.task_id).sort((a, b) => a.variant - b.variant);
+    if (rows.length === 0) continue;
+
+    if (task.status === 0) {
+      const item = task.items[0];
+      const stage = item?.stage ? `${item.stage}` : "";
+      const pct = typeof item?.progress === "number" && item.progress > 0 ? ` ${Math.round(item.progress * 100)}%` : "";
+      const progress = [stage + pct, task.progress_text].filter(Boolean).join(" · ").slice(0, 300) || "Generando…";
+      for (const s of rows) {
+        db.update(songs).set({ status: "generating", progress, updatedAt: now() }).where(eq(songs.id, s.id)).run();
+      }
+      continue;
+    }
+
+    if (task.status === 2) {
+      const error = task.items[0]?.error ?? task.progress_text ?? (task.result || "La generación falló");
+      for (const s of rows) {
+        db.update(songs).set({ status: "failed", error: String(error).slice(0, 1000), progress: "", updatedAt: now() }).where(eq(songs.id, s.id)).run();
+      }
+      continue;
+    }
+
+    // Succeeded: one item per generated audio.
+    const files = task.items.filter((i) => i.file);
+    fs.mkdirSync(AUDIO_DIR, { recursive: true });
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const item = files[i];
+      if (!item) {
+        // Engine produced fewer variants than requested (e.g. batch limited on Mac).
+        db.delete(songs).where(eq(songs.id, row.id)).run();
+        continue;
+      }
+      try {
+        const rawAudioFile = `${row.id}.raw.mp3`;
+        const buf = await engine.downloadAudio(item.file);
+        fs.writeFileSync(path.join(AUDIO_DIR, rawAudioFile), buf);
+        db.update(songs).set({ progress: "✨ Post-producción", updatedAt: now() }).where(eq(songs.id, row.id)).run();
+        const audioFile = await masterInto(row.id, rawAudioFile, `${row.id}.mp3`, row.masterPreset as MasterPreset);
+        const metas = item.metas ?? {};
+        db.update(songs)
+          .set({
+            status: row.voiceId ? "converting" : "done",
+            progress: row.voiceId ? "Enviando a conversión de voz" : "",
+            rawAudioFile,
+            audioFile,
+            bpm: typeof metas.bpm === "number" && metas.bpm >= 30 && metas.bpm < 300 ? metas.bpm : null,
+            keyScale: typeof metas.keyscale === "string" && metas.keyscale !== "N/A" ? metas.keyscale : null,
+            timeSignature: typeof metas.timesignature === "string" && metas.timesignature !== "N/A" ? metas.timesignature : null,
+            duration: typeof metas.duration === "number" ? metas.duration : row.duration,
+            style: row.style || item.prompt || row.style,
+            lyrics: row.lyrics || item.lyrics || row.lyrics,
+            updatedAt: now(),
+          })
+          .where(and(eq(songs.id, row.id)))
+          .run();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        db.update(songs).set({ status: "failed", error: msg, updatedAt: now() }).where(eq(songs.id, row.id)).run();
+      }
+    }
+  }
+}
+
+/** Songs generated with a voice profile: submit them to the voice service and collect the result. */
+async function syncVoiceConversion(): Promise<void> {
+  const rows = db.select().from(songs).where(eq(songs.status, "converting")).all();
+  if (rows.length === 0) return;
+  fs.mkdirSync(AUDIO_DIR, { recursive: true });
+
+  for (const row of rows) {
+    try {
+      if (!row.voiceJobId) {
+        const v = row.voiceId ? getVoice(row.voiceId) : undefined;
+        // Always convert the model's own output: on a re-conversion rawAudioFile already points at the converted mix.
+        const modelRaw = path.join(AUDIO_DIR, `${row.id}.raw.mp3`);
+        const src = fs.existsSync(modelRaw) ? modelRaw : row.rawAudioFile ? path.join(AUDIO_DIR, row.rawAudioFile) : audioPathFor(row);
+        if (!v || !src) {
+          db.update(songs).set({ status: "done", progress: "", error: "Voz no disponible; se conserva la voz original", updatedAt: now() }).where(eq(songs.id, row.id)).run();
+          continue;
+        }
+        const job = await voice.submitConversion(src, voicePath(v), { autotune: row.autotune, keyScale: row.keyScale, refKind: voiceKind(v) });
+        db.update(songs).set({ voiceJobId: job.job_id, progress: `🎤 En cola de conversión (#${job.queue_position})`, updatedAt: now() }).where(eq(songs.id, row.id)).run();
+        continue;
+      }
+
+      const job = await voice.jobStatus(row.voiceJobId);
+      if (!job) {
+        // The voice service was restarted and lost the job: resubmit on the next sync.
+        db.update(songs).set({ voiceJobId: null, progress: "🎤 Reenviando a conversión de voz", updatedAt: now() }).where(eq(songs.id, row.id)).run();
+      } else if (job.status === "queued" || job.status === "running") {
+        db.update(songs).set({ progress: `🎤 ${job.stage}`, updatedAt: now() }).where(eq(songs.id, row.id)).run();
+      } else if (job.status === "failed") {
+        // Keep the song playable with the original vocals and surface the error.
+        db.update(songs).set({ status: "done", progress: "", error: `Conversión de voz falló: ${job.error ?? "error desconocido"}`, updatedAt: now() }).where(eq(songs.id, row.id)).run();
+      } else {
+        const buf = await voice.downloadJobAudio(row.voiceJobId);
+        const convertedRaw = `${row.id}.voice.raw.mp3`;
+        fs.writeFileSync(path.join(AUDIO_DIR, convertedRaw), buf);
+        db.update(songs).set({ progress: "✨ Post-producción", updatedAt: now() }).where(eq(songs.id, row.id)).run();
+        const converted = await masterInto(row.id, convertedRaw, `${row.id}.voice.mp3`, row.masterPreset as MasterPreset);
+        db.update(songs)
+          .set({ status: "done", progress: "", originalAudioFile: row.originalAudioFile ?? row.audioFile, rawAudioFile: convertedRaw, audioFile: converted, error: null, updatedAt: now() })
+          .where(eq(songs.id, row.id))
+          .run();
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      db.update(songs).set({ progress: `🎤 Servicio de voz no disponible: ${msg}`.slice(0, 300), updatedAt: now() }).where(eq(songs.id, row.id)).run();
+    }
+  }
+}
+
+/** Masters `rawFile` into `outFile`; on failure keeps the raw audio so the song stays playable. */
+async function masterInto(songId: string, rawFile: string, outFile: string, preset: MasterPreset): Promise<string> {
+  try {
+    await masterAudio(path.join(AUDIO_DIR, rawFile), path.join(AUDIO_DIR, outFile), preset);
+    return outFile;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    db.update(songs).set({ error: `Post-producción falló: ${msg.slice(0, 200)}`, updatedAt: now() }).where(eq(songs.id, songId)).run();
+    fs.copyFileSync(path.join(AUDIO_DIR, rawFile), path.join(AUDIO_DIR, outFile));
+    return outFile;
+  }
+}
+
+/**
+ * Post-production on demand, always from the raw model output:
+ *   raw → [Apollo AI restoration] → [mastering preset] → audioFile
+ * Either step can be skipped; both off restores the raw audio.
+ */
+export async function postProduce(id: string, opts: { enhance: boolean; preset: MasterPreset }): Promise<Song> {
+  const song = getSong(id);
+  if (!song) throw new Error("No existe");
+  if (song.status !== "done" || !song.audioFile) throw new Error("La canción aún no está lista");
+  let rawAudioFile = song.rawAudioFile;
+  if (!rawAudioFile) {
+    // Songs generated before post-production existed: their current audio is the raw output.
+    rawAudioFile = `${song.id}.raw.mp3`;
+    fs.copyFileSync(path.join(AUDIO_DIR, song.audioFile), path.join(AUDIO_DIR, rawAudioFile));
+    db.update(songs).set({ rawAudioFile, updatedAt: now() }).where(eq(songs.id, id)).run();
+  }
+  const raw = path.join(AUDIO_DIR, rawAudioFile);
+  const out = path.join(AUDIO_DIR, song.audioFile);
+  let source = raw;
+  const tmp = path.join(AUDIO_DIR, `${song.id}.enhanced.wav`);
+  try {
+    if (opts.enhance) {
+      fs.writeFileSync(tmp, await voice.enhanceAudio(raw));
+      source = tmp;
+    }
+    await masterAudio(source, out, opts.preset);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+  db.update(songs).set({ masterPreset: opts.preset, enhanced: opts.enhance, updatedAt: now() }).where(eq(songs.id, id)).run();
+  return getSong(id)!;
+}
+
+/** Re-runs the voice conversion of a finished song (e.g. toggling autotune or after cleaning the voice). */
+export function reconvertVoice(id: string, opts: { autotune?: boolean; voiceId?: string }): Song {
+  const song = getSong(id);
+  if (!song) throw new Error("No existe");
+  if (song.status !== "done") throw new Error("La canción aún no está lista");
+  const voiceId = opts.voiceId ?? song.voiceId;
+  if (!voiceId || !getVoice(voiceId)) throw new Error("Esta canción no tiene una voz asignada");
+  if (!fs.existsSync(path.join(AUDIO_DIR, `${song.id}.raw.mp3`))) throw new Error("No se conserva el audio original del modelo para reconvertir");
+  db.update(songs)
+    .set({ voiceId, autotune: opts.autotune ?? song.autotune, status: "converting", voiceJobId: null, progress: "🎤 Reenviando a conversión de voz", error: null, updatedAt: now() })
+    .where(eq(songs.id, id))
+    .run();
+  return getSong(id)!;
+}
+
+/** Turns a natural-language instruction into a concrete cover/repaint plan (Ollama, with a plain fallback). */
+export async function planSongEdit(id: string, instruction: string, range: { start: number | null; end: number | null }): Promise<EditPlan> {
+  const song = getSong(id);
+  if (!song) throw new Error("No existe");
+  if (song.status !== "done" || !song.audioFile) throw new Error("La canción aún no está lista");
+  const text = instruction.trim();
+  if (!text) throw new Error("Escribe qué quieres cambiar.");
+  const hasRange = range.start !== null || range.end !== null;
+  if (await ollamaAvailable()) {
+    return planEdit({ instruction: text, style: song.style, lyrics: song.lyrics, duration: song.duration, start: range.start, end: range.end });
+  }
+  // No LLM: a range means repaint with the instruction as caption; otherwise a cover with the instruction appended.
+  return hasRange
+    ? { op: "repaint", style: `${song.style}, ${text}`, lyrics: song.lyrics, strength: 0.75, start: range.start ?? 0, end: range.end ?? song.duration ?? -1, summary: "Regenerar el tramo con la instrucción como descripción." }
+    : { op: "cover", style: `${song.style}, ${text}`, lyrics: song.lyrics, strength: 0.75, start: null, end: null, summary: "Regenerar la canción con la instrucción añadida al estilo." };
+}
+
+/** Submits the edit as a new song version linked to the original (same artist, album and voice). */
+export async function editSong(id: string, instruction: string, plan: EditPlan): Promise<Song[]> {
+  const song = getSong(id);
+  if (!song) throw new Error("No existe");
+  if (song.status !== "done" || !song.audioFile) throw new Error("La canción aún no está lista");
+  // Always edit from the unprocessed model output, without the converted voice.
+  const srcFile = song.originalAudioFile ? `${song.id}.raw.mp3` : song.rawAudioFile ?? song.audioFile;
+  const srcPath = path.join(AUDIO_DIR, fs.existsSync(path.join(AUDIO_DIR, srcFile)) ? srcFile : song.audioFile);
+  const task = await engine.releaseEditTask(
+    {
+      task_type: plan.op,
+      prompt: plan.style,
+      lyrics: song.instrumental ? "[Instrumental]" : plan.lyrics,
+      vocal_language: song.vocalLanguage,
+      model: song.model,
+      audio_cover_strength: plan.strength,
+      repainting_start: plan.start ?? 0,
+      repainting_end: plan.end ?? -1,
+      batch_size: 1,
+    },
+    { buffer: fs.readFileSync(srcPath), filename: path.basename(srcPath) },
+  );
+  const ts = now();
+  const siblings = db.select({ n: songs.id }).from(songs).where(eq(songs.parentId, song.parentId ?? song.id)).all().length;
+  const row = {
+    id: randomUUID(),
+    taskId: task.task_id,
+    variant: 0,
+    title: song.title.replace(/ · edición \d+$/, "") + ` · edición ${siblings + 1}`,
+    mode: song.mode,
+    description: song.description,
+    style: plan.style,
+    lyrics: song.instrumental ? "[Instrumental]" : plan.lyrics,
+    instrumental: song.instrumental,
+    duration: song.duration,
+    vocalLanguage: song.vocalLanguage,
+    model: song.model,
+    voiceId: song.voiceId,
+    autotune: song.autotune,
+    masterPreset: "off" as const,
+    artistId: song.artistId,
+    albumId: song.albumId,
+    parentId: song.parentId ?? song.id,
+    editOp: plan.op,
+    editInstruction: instruction.trim(),
+    status: "queued" as const,
+    progress: task.queue_position ? `En cola (#${task.queue_position})` : "En cola",
+    createdAt: ts,
+    updatedAt: ts,
+  };
+  db.insert(songs).values(row).run();
+  return db.select().from(songs).where(eq(songs.id, row.id)).all();
+}
