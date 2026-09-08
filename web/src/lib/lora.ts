@@ -37,7 +37,7 @@ function slug(name: string): string {
     .replace(/^_+|_+$/g, "") || "artist";
 }
 
-function setLora(id: string, patch: Partial<Pick<Artist, "loraStatus" | "loraPath" | "loraProgress" | "loraError" | "loraTag">>) {
+function setLora(id: string, patch: Partial<Pick<Artist, "loraStatus" | "loraPath" | "loraProgress" | "loraError" | "loraTag" | "loraAdapter">>) {
   db.update(artists).set(patch).where(eq(artists.id, id)).run();
 }
 
@@ -143,7 +143,9 @@ async function runPipeline(artist: Artist, material: ReturnType<typeof trainingS
     // The export copies the trainer's `final/` folder, whose PEFT adapter lives in `adapter/` (adapter_config.json):
     // `/v1/lora/load` wants that inner directory, not the export root.
     const adapterDir = fs.existsSync(path.join(exported.export_path, "adapter", "adapter_config.json")) ? path.join(exported.export_path, "adapter") : exported.export_path;
-    setLora(artist.id, { loraStatus: "done", loraPath: adapterDir, loraProgress: `Listo: ${material.length} canciones, ${epochs} épocas` });
+    // A fresh adapter name per training: the engine keeps loaded adapters in memory and cannot replace one in
+    // place, so re-adding under the old name would keep serving the previous weights.
+    setLora(artist.id, { loraStatus: "done", loraPath: adapterDir, loraAdapter: `${tag}_${Date.now().toString(36)}`, loraProgress: `Listo: ${material.length} canciones, ${epochs} épocas` });
     // Training leaves the engine dirty: its LM unloaded (simple mode needs it) and the decoder wrapped by the
     // trainer's own PEFT adapter with no base backup, so `/v1/lora/unload` fails with "Base decoder backup not
     // found". `/v1/reinitialize` reloads everything clean (~1–2 min); the engine's docs ask for it before training too.
@@ -192,7 +194,7 @@ export async function artistLoraStatus(artistId: string) {
 export async function applyLoraForGeneration(artist: Artist | undefined, useLora: boolean): Promise<string> {
   const status = await engine.loraStatus().catch(() => null);
   if (useLora && artist?.loraStatus === "done" && artist.loraPath && artist.loraTag && fs.existsSync(artist.loraPath)) {
-    const name = artist.loraTag;
+    const name = artist.loraAdapter ?? artist.loraTag;
     if (!status?.adapters.includes(name)) {
       await engine.loadLora(artist.loraPath, name); // add_lora: becomes the active adapter
     } else if (status.active_adapter !== name) {
@@ -202,7 +204,7 @@ export async function applyLoraForGeneration(artist: Artist | undefined, useLora
       await engine.loadLora(artist.loraPath, name);
     }
     await engine.toggleLora(true);
-    return name;
+    return artist.loraTag;
   }
   if (status?.use_lora) await engine.toggleLora(false);
   return "";

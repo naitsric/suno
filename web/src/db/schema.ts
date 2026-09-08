@@ -106,6 +106,8 @@ export const artists = sqliteTable("artists", {
   loraProgress: text("lora_progress").notNull().default(""),
   loraError: text("lora_error"),
   loraTag: text("lora_tag"),
+  /** Adapter name registered in the engine for the current export (changes on every training: the engine cannot replace an adapter in place). */
+  loraAdapter: text("lora_adapter"),
   createdAt: integer("created_at").notNull(),
 });
 

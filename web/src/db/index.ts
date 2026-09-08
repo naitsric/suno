@@ -132,6 +132,7 @@ function ensureSchema(sqlite: Database.Database) {
     ["lora_progress", "lora_progress TEXT NOT NULL DEFAULT ''"],
     ["lora_error", "lora_error TEXT"],
     ["lora_tag", "lora_tag TEXT"],
+    ["lora_adapter", "lora_adapter TEXT"],
   ] as const) {
     if (!artistCols.has(col)) sqlite.exec(`ALTER TABLE artists ADD COLUMN ${ddl}`);
   }

@@ -36,6 +36,7 @@ export function createArtist(input: { name: string; emoji?: string; style?: stri
     loraProgress: "",
     loraError: null,
     loraTag: null,
+    loraAdapter: null,
     createdAt: Date.now(),
   };
   db.insert(artists).values(row).run();
