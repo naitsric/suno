@@ -1,12 +1,17 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { reconvertVoice, removeVoice } from "@/lib/songs";
+import { ConversionOptionsSchema } from "@/lib/voice-options";
 
 export const dynamic = "force-dynamic";
 
-const Schema = z.object({ autotune: z.boolean().optional(), voiceId: z.string().min(1).optional() });
+const Schema = z.object({ autotune: z.boolean().optional(), voiceId: z.string().min(1).optional(), options: ConversionOptionsSchema.nullable().optional() });
 
-/** Re-converts the song's vocals with the current voice settings (autotune on/off, cleaned reference). */
+/**
+ * Re-converts the song's vocals with the current voice settings (autotune on/off, cleaned reference) and,
+ * optionally, quality knobs (`options`: diffusionSteps, cfgRate, refDenoise, refSeconds, glueSpectrumDb,
+ * glueReverb, enhanceVocals, deharshDb). `options: null` returns to the service defaults; omitted keeps the stored ones.
+ */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const parsed = Schema.safeParse(await req.json().catch(() => ({})));

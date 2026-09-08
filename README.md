@@ -193,6 +193,41 @@ análisis tarda 3–5 min con el modelo de 12B y se cachea por fotografía + per
    volumen igualada a la del stem (120 ms; recupera dinámica, fades y silencios), y una
    reverberación sintética al nivel wet/dry medido en el stem original con DeEcho (−24…−8 dB).
    Sin esto la voz de Seed-VC sale seca y plana y suena pegada encima del instrumental.
+
+   **Mandos de calidad de la conversión** (opcionales, por canción; `options` en
+   `POST /api/songs/[id]/voice` y `voiceOptions` en `POST /api/songs`, guardados en `songs.voice_options`
+   y enviados a `POST :8002/convert`; sin ellos el servicio usa sus valores de siempre):
+
+   | Opción | Campo en `/convert` | Por defecto | Qué hace |
+   |---|---|---|---|
+   | `diffusionSteps` | `diffusion_steps` | 30 | pasos de difusión de Seed-VC (60 ≈ 2× de tiempo) |
+   | `cfgRate` | `cfg_rate` | 0.7 | classifier-free guidance de Seed-VC |
+   | `refDenoise` | `ref_denoise` | false | 2º Demucs + DeEcho sobre la referencia antes de Seed-VC |
+   | `refSeconds` | `ref_seconds` | 30 | segundos de referencia como prompt (Seed-VC corta a 25) |
+   | `glueSpectrumDb` | `glue_spectrum_db` | 8 | tope del EQ automático de `match_spectrum` (0 = sin EQ) |
+   | `glueReverb` | `glue_reverb` | true | reverberación sintética al nivel medido |
+   | `enhanceVocals` | `enhance_vocals` | false | Apollo sobre el stem convertido antes de mezclar |
+   | `deharshDb` | `deharsh_db` | 0 | atenúa en dB la parte no armónica (HPSS) del stem convertido por encima de 2.5 kHz |
+
+   `keep_stems=true` (solo en `/convert`) conserva `vocals.wav`, `vocals_converted.wav` y la referencia en
+   `engine/voice/.cache/jobs/<job>/` para medir; `GET /jobs/{id}` devuelve `timings` por etapa.
+
+   > Lo que se midió (sept. 2026, «Te fuiste sin avisar», voz cantada extraída de la misma canción, es
+   > decir, conversión casi identidad; métricas sobre el stem de voz convertido frente al stem original,
+   > tramo de 75 s): el stem de Seed-VC sale con **+6 dB en 3–7 kHz y en 8–16 kHz, 2.7 dB menos de HNR
+   > (10.9 frente a 13.6) y la banda de presencia más ruidosa (planitud 0.25 frente a 0.18)**, con el F0
+   > clavado (corr. 0.99, desvío mediano 0.1 st) y una distancia log-mel de ≈ 6.9 dB (el suelo de la
+   > métrica, Demucs en MPS frente a CPU, es 0.9 dB). Eso es lo que se oye como «metálico», y viene de
+   > la re-síntesis del modelo, no de la referencia ni de la mezcla. Variantes, una por conversión:
+   > 60 pasos → HNR 12.0, +1 dB (2× de tiempo); cfg 0.5 → sin cambio; Apollo sobre el stem → sin cambio
+   > y F0 algo peor; referencia de 10 s → peor (HNR 9.2); referencia con 2º Demucs + DeEcho → sin
+   > cambio (solo había −42 dB de instrumentos colados); `match_spectrum` a 3 dB o quitado → solo cambia
+   > el balance (+3.5 dB de presencia), no la textura; `deharshDb: 4` → HNR 13.6 (= original) y
+   > planitud 0.23 sin tocar el F0. El modelo de canto ya es el de 44.1 kHz con BigVGAN 44k, así que no
+   > hay vocoder mejor que cargar. Si con estos mandos sigue sonando sintético, el siguiente paso es
+   > fine-tuning de Seed-VC con la voz del artista (`engine/voice/seed-vc/train.py`, preset
+   > `config_dit_mel_seed_uvit_whisper_base_f0_44k.yml`, carpeta con los stems de voz de sus canciones,
+   > ~100–500 pasos en MPS) o un LoRA del artista en ACE-Step para que el motor cante ya con esa voz.
 4. El resultado sustituye al audio de la canción; la versión original queda disponible con
    `?original` y en el botón «orig.» de la tarjeta. Si la conversión falla, la canción se conserva
    con la voz original y se muestra el error.

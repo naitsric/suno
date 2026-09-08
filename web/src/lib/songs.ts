@@ -7,6 +7,7 @@ import { songs, type Song } from "@/db/schema";
 import * as engine from "./acestep";
 import { draftSong, ollamaAvailable, planEdit, type EditPlan } from "./ollama";
 import * as voice from "./voice";
+import { parseConversionOptions, type ConversionOptions } from "./voice-options";
 import * as video from "./video";
 import { buildStoryboard } from "./storyboard";
 import { masterAudio, type MasterPreset } from "./master";
@@ -32,6 +33,8 @@ export type CreateSongInput = {
   model?: string | null;
   voiceId?: string | null;
   autotune?: boolean;
+  /** Conversion quality knobs (see lib/voice-options.ts); omitted = service defaults. */
+  voiceOptions?: ConversionOptions | null;
   master?: MasterPreset;
   artistId?: string | null;
   albumId?: string | null;
@@ -132,6 +135,7 @@ export async function createSong(input: CreateSongInput): Promise<Song[]> {
     model: input.model ?? null,
     voiceId: input.instrumental ? null : input.voiceId ?? null,
     autotune: !!input.autotune && !input.instrumental && !!input.voiceId,
+    voiceOptions: input.voiceOptions && Object.keys(input.voiceOptions).length ? JSON.stringify(input.voiceOptions) : null,
     masterPreset: input.master ?? "off",
     artistId: input.artistId ?? null,
     albumId: input.albumId ?? null,
@@ -409,7 +413,7 @@ async function syncVoiceConversion(): Promise<void> {
           db.update(songs).set({ status: "done", progress: "", error: "Voz no disponible; se conserva la voz original", updatedAt: now() }).where(eq(songs.id, row.id)).run();
           continue;
         }
-        const job = await voice.submitConversion(src, voicePath(v), { autotune: row.autotune, keyScale: row.keyScale, refKind: voiceKind(v) });
+        const job = await voice.submitConversion(src, voicePath(v), { autotune: row.autotune, keyScale: row.keyScale, refKind: voiceKind(v), options: parseConversionOptions(row.voiceOptions) });
         db.update(songs).set({ voiceJobId: job.job_id, progress: `🎤 En cola de conversión (#${job.queue_position})`, updatedAt: now() }).where(eq(songs.id, row.id)).run();
         continue;
       }
@@ -487,8 +491,11 @@ export async function postProduce(id: string, opts: { enhance: boolean; preset: 
   return getSong(id)!;
 }
 
-/** Re-runs the voice conversion of a finished song (e.g. toggling autotune or after cleaning the voice). */
-export function reconvertVoice(id: string, opts: { autotune?: boolean; voiceId?: string }): Song {
+/**
+ * Re-runs the voice conversion of a finished song (e.g. toggling autotune, after cleaning the voice or with
+ * other quality knobs). `options` replaces the stored knobs (null = back to the service defaults); omitted keeps them.
+ */
+export function reconvertVoice(id: string, opts: { autotune?: boolean; voiceId?: string; options?: ConversionOptions | null }): Song {
   const song = getSong(id);
   if (!song) throw new Error("No existe");
   if (song.status !== "done") throw new Error("La canción aún no está lista");
@@ -496,7 +503,16 @@ export function reconvertVoice(id: string, opts: { autotune?: boolean; voiceId?:
   if (!voiceId || !getVoice(voiceId)) throw new Error("Esta canción no tiene una voz asignada");
   if (!fs.existsSync(path.join(AUDIO_DIR, `${song.id}.raw.mp3`))) throw new Error("No se conserva el audio original del modelo para reconvertir");
   db.update(songs)
-    .set({ voiceId, autotune: opts.autotune ?? song.autotune, status: "converting", voiceJobId: null, progress: "🎤 Reenviando a conversión de voz", error: null, updatedAt: now() })
+    .set({
+      voiceId,
+      autotune: opts.autotune ?? song.autotune,
+      voiceOptions: opts.options === undefined ? song.voiceOptions : opts.options && Object.keys(opts.options).length ? JSON.stringify(opts.options) : null,
+      status: "converting",
+      voiceJobId: null,
+      progress: "🎤 Reenviando a conversión de voz",
+      error: null,
+      updatedAt: now(),
+    })
     .where(eq(songs.id, id))
     .run();
   return getSong(id)!;

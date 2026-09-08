@@ -90,6 +90,7 @@ function ensureSchema(sqlite: Database.Database) {
     ["edit_op", "edit_op TEXT"],
     ["edit_instruction", "edit_instruction TEXT"],
     ["autotune", "autotune INTEGER NOT NULL DEFAULT 0"],
+    ["voice_options", "voice_options TEXT"],
     ["video_status", "video_status TEXT NOT NULL DEFAULT 'none'"],
     ["video_job_id", "video_job_id TEXT"],
     ["video_file", "video_file TEXT"],

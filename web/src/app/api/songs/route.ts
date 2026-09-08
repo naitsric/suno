@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createSong, listSongs, syncPending } from "@/lib/songs";
 import { MASTER_PRESETS } from "@/lib/master-presets";
+import { ConversionOptionsSchema } from "@/lib/voice-options";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,8 @@ const CreateSchema = z.object({
   model: z.string().nullable().optional(),
   voiceId: z.string().nullable().optional(),
   autotune: z.boolean().default(false),
+  /** Conversion quality knobs (see lib/voice-options.ts); omitted = service defaults. */
+  voiceOptions: ConversionOptionsSchema.nullable().optional(),
   master: z.enum(MASTER_PRESETS).default("off"),
   artistId: z.string().nullable().optional(),
   albumId: z.string().nullable().optional(),

@@ -25,8 +25,10 @@ REST API (port 8002):
                            energy, structure, stems, vocals + language, CLAP genre/mood/instrument tags); see reference.py
   GET  /reference-analysis/{token} -> {stage} while an analysis with that token runs
   POST /convert            multipart: song (audio), reference (audio), [pitch_shift], [diffusion_steps], [auto_octave],
-                           [autotune], [autotune_strength], [key_scale]  (autotune = the song's F0 is snapped to
-                           the nearest scale note before conditioning Seed-VC, so the sung pitch comes out in tune)
+                           [autotune], [autotune_strength], [key_scale], [ref_kind], [cfg_rate], [ref_denoise],
+                           [ref_seconds], [glue_spectrum_db], [glue_reverb], [enhance_vocals], [deharsh_db], [keep_stems]
+                           (autotune = the song's F0 is snapped to the nearest scale note before conditioning
+                           Seed-VC, so the sung pitch comes out in tune; the rest are quality knobs, see Job)
   GET  /jobs/{id}          -> {status: queued|running|done|failed, stage, error, octave_shift}
   GET  /jobs/{id}/audio    -> converted MP3
 """
@@ -80,6 +82,16 @@ class Job:
     autotune_strength: float = 0.8
     key_scale: str = ""  # e.g. "E major", "A minor"; empty = chromatic
     ref_kind: str = "speech"  # "singing" = the reference already sings: its own range is the comfortable range
+    # Quality knobs (all opt-in from the web; defaults reproduce the historical pipeline):
+    cfg_rate: float = 0.7  # Seed-VC classifier-free guidance; lower = less forced timbre, smoother texture
+    ref_denoise: bool = False  # second Demucs pass + DeEcho over the reference (less instrument bleed/room)
+    ref_seconds: float = 30.0  # reference length used as prompt (Seed-VC itself caps it at 25 s)
+    glue_spectrum_db: float = 8.0  # max EQ of match_spectrum in the mix (0 = skip the spectral match)
+    glue_reverb: bool = True  # synthetic reverb at the measured wet level of the original stem
+    enhance_vocals: bool = False  # Apollo restoration over the converted stem before mixing
+    deharsh_db: float = 0.0  # attenuate the non-harmonic (noisy) part of the converted stem above 2.5 kHz by this much
+    keep_stems: bool = False  # keep vocals.wav / vocals_converted.wav in the job dir (for A/B measurements)
+    timings: dict = field(default_factory=dict)  # stage → seconds
     status: str = "queued"
     stage: str = "En cola"
     error: Optional[str] = None
@@ -392,7 +404,7 @@ def _convert_vocals(vc, vocals_wav: Path, reference_wav: Path, job: Job, out_dir
         target=str(reference_wav),
         diffusion_steps=job.diffusion_steps,
         length_adjust=1.0,
-        inference_cfg_rate=0.7,
+        inference_cfg_rate=job.cfg_rate,
         f0_condition=True,
         auto_f0_adjust=False,  # keep the song's melody/key; only the timbre changes
         pitch_shift=job.pitch_shift + job.octave_shift,  # octaves keep the key too
@@ -500,9 +512,27 @@ def add_reverb(voc: np.ndarray, wet_db: float, rt60: float = 1.6, predelay_ms: f
     return voc + wet.astype(np.float32)
 
 
-def mix(vocals_wav: Path, instrumental_wav: Path, out_mp3: Path) -> None:
+def soften_noise(conv: np.ndarray, att_db: float, f_lo: float = 2500.0) -> np.ndarray:
+    """Attenuates the non-harmonic part of a vocal (HPSS residual) above `f_lo` by `att_db`, harmonics untouched.
+    Measured on a near-identity conversion (reference taken from the same song): Seed-VC's stem came out with
+    +6 dB in 3–7 kHz, a noisier presence band (flatness 0.25 vs 0.18) and 2.7 dB less HNR than the original stem;
+    4 dB here brought the HNR back to the original (13.6 dB) and the flatness half-way, without touching F0."""
+    import librosa
+
+    D = librosa.stft(conv, n_fft=2048, hop_length=512)
+    H, P = librosa.decompose.hpss(D, kernel_size=(17, 17), margin=1.0)
+    f = librosa.fft_frequencies(sr=SR, n_fft=2048)
+    g = np.ones_like(f)
+    g[f >= f_lo] = 10 ** (-att_db / 20)
+    ramp = (f >= f_lo / 2) & (f < f_lo)
+    g[ramp] = 10 ** (-att_db / 20 * (f[ramp] - f_lo / 2) / (f_lo / 2))
+    return librosa.istft(H + P * g[:, None], hop_length=512, length=len(conv)).astype(np.float32)
+
+
+def mix(vocals_wav: Path, instrumental_wav: Path, out_mp3: Path, spectrum_db: float = 8.0, reverb: bool = True, deharsh_db: float = 0.0) -> None:
     """Mixes the converted vocal back, glued to the space of the original vocal stem:
-    spectral match → loudness-envelope match → reverb at the original's measured wet level → sum."""
+    [soften the noisy highs by `deharsh_db`] → spectral match (up to `spectrum_db`; 0 skips it) → loudness-envelope
+    match → reverb at the original's measured wet level (optional) → sum."""
     voc, sr_v = sf.read(vocals_wav, dtype="float32", always_2d=True)
     inst, sr_i = sf.read(instrumental_wav, dtype="float32", always_2d=True)
     assert sr_v == SR and sr_i == SR, (sr_v, sr_i)
@@ -510,19 +540,25 @@ def mix(vocals_wav: Path, instrumental_wav: Path, out_mp3: Path) -> None:
     orig_mono = orig.mean(axis=1)
     mono = voc.mean(axis=1)
     try:
-        mono = match_spectrum(mono, orig_mono)
+        if deharsh_db > 0:
+            mono = soften_noise(mono, deharsh_db)
+        if spectrum_db > 0:
+            mono = match_spectrum(mono, orig_mono, max_db=spectrum_db)
         mono = match_envelope(mono, orig_mono)
     except Exception as exc:  # noqa: BLE001  (glue is best effort; the plain mix still works)
         print(f"[voice] mix glue skipped: {exc}", flush=True)
     voc = np.repeat(mono[:, None], 2, axis=1)
-    try:
-        wet_db = measure_reverb_db(vocals_wav.parent / "vocals.wav", vocals_wav.parent)
-        wet_db = float(np.clip(wet_db, -24.0, -8.0))
-    except Exception as exc:  # noqa: BLE001
-        print(f"[voice] reverb measurement failed ({exc}); using -14 dB", flush=True)
-        wet_db = -14.0
-    print(f"[voice] mix glue: reverb {wet_db:.1f} dB", flush=True)
-    voc = add_reverb(voc, wet_db)
+    if reverb:
+        try:
+            wet_db = measure_reverb_db(vocals_wav.parent / "vocals.wav", vocals_wav.parent)
+            wet_db = float(np.clip(wet_db, -24.0, -8.0))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[voice] reverb measurement failed ({exc}); using -14 dB", flush=True)
+            wet_db = -14.0
+        print(f"[voice] mix glue: spectrum ±{spectrum_db:g} dB, reverb {wet_db:.1f} dB", flush=True)
+        voc = add_reverb(voc, wet_db)
+    else:
+        print(f"[voice] mix glue: spectrum ±{spectrum_db:g} dB, no reverb", flush=True)
     n = max(len(voc), len(inst))
     voc = np.pad(voc, ((0, n - len(voc)), (0, 0)))
     inst = np.pad(inst, ((0, n - len(inst)), (0, 0)))
@@ -545,17 +581,57 @@ def run_job(job: Job) -> None:
         _run_job(job)
 
 
+def denoise_reference(ref_wav: Path, work: Path) -> tuple[Path, dict]:
+    """Cleans a (sung) reference before it is used as the Seed-VC prompt: a second Demucs pass drops the
+    instrument bleed that survives in a vocal stem (trumpets, strings), then DeEcho dries the room.
+    Returns the clean mono WAV and {bleed_db, reverb_db}: level of what was removed, relative to the input."""
+    x, _ = sf.read(ref_wav, dtype="float32", always_2d=True)
+    stereo = work / "ref_stereo.wav"
+    sf.write(stereo, np.repeat(x[:, :1], 2, axis=1), SR)
+    (work / "refsep").mkdir(parents=True, exist_ok=True)
+    voc, _ = separate(stereo, work / "refsep")
+    v, _ = sf.read(voc, dtype="float32", always_2d=True)
+    v = v.mean(axis=1)[: len(x)]
+    rms = lambda a: float(np.sqrt(np.mean(a**2)) + 1e-9)  # noqa: E731
+    bleed_db = round(float(20 * np.log10(rms(x[: len(v), 0] - v) / rms(x[:, 0]))), 1)
+    voc_mono = work / "ref_vocals.wav"
+    sf.write(voc_mono, v, SR)
+    out = work / "ref_clean.wav"
+    reverb_db = dereverb_file(voc_mono, out, work)
+    # keep the prompt at the level the reference had (Seed-VC's style encoder is level-sensitive)
+    y, _ = sf.read(out, dtype="float32")
+    sf.write(out, np.clip(y * (rms(x[:, 0]) / rms(y)), -1, 1), SR)
+    return out, {"bleed_db": bleed_db, "reverb_db": reverb_db}
+
+
 def _run_job(job: Job) -> None:
     job.stage = "Cargando modelos"
+    t0 = time.time()
+
+    def mark(name: str) -> None:
+        nonlocal t0
+        job.timings[name] = round(time.time() - t0, 1)
+        t0 = time.time()
+
     try:
         load_models()
+        mark("load")
         song_wav = job.dir / "song.wav"
         ref_wav = job.dir / "reference.wav"
         job.stage = "Preparando audio"
         ffmpeg("-i", str(job.song), "-ac", "2", "-ar", str(SR), str(song_wav))
-        ffmpeg("-i", str(job.reference), "-ac", "1", "-ar", str(SR), "-t", "30", str(ref_wav))
+        ffmpeg("-i", str(job.reference), "-ac", "1", "-ar", str(SR), "-t", str(job.ref_seconds), str(ref_wav))
         job.stage = "Separando voz e instrumental"
         vocals, instrumental = separate(song_wav, job.dir)
+        mark("demucs")
+        if job.ref_denoise:
+            job.stage = "Limpiando la referencia"
+            try:
+                ref_wav, info = denoise_reference(ref_wav, job.dir)
+                print(f"[voice] ref denoise: bleed removed {info['bleed_db']} dB, reverb {info['reverb_db']} dB", flush=True)
+            except Exception as exc:  # noqa: BLE001  (best effort: fall back to the reference as given)
+                print(f"[voice] ref denoise failed ({exc}); using the reference as given", flush=True)
+            mark("ref_denoise")
         if job.auto_octave:
             job.stage = "Comparando el tono de la canción con tu voz"
             try:
@@ -581,9 +657,25 @@ def _run_job(job: Job) -> None:
         notes = [{-12: "melodía una octava abajo", 12: "melodía una octava arriba"}.get(job.octave_shift, ""), "afinada" if job.autotune else ""]
         job.stage = "Convirtiendo la voz a tu timbre" + (f" ({', '.join(n for n in notes if n)})" if any(notes) else "")
         converted = convert_vocals(vocals, ref_wav, job, job.dir)
+        mark("seed_vc")
+        if job.enhance_vocals:
+            job.stage = "Restaurando la voz convertida (Apollo)"
+            try:
+                m, _ = sf.read(converted, dtype="float32", always_2d=True)
+                st = job.dir / "vocals_converted_stereo.wav"
+                sf.write(st, np.repeat(m[:, :1], 2, axis=1), SR)
+                enhance_file(st, job.dir / "vocals_enhanced.wav")
+                st.unlink(missing_ok=True)
+                converted = job.dir / "vocals_enhanced.wav"
+            except Exception as exc:  # noqa: BLE001
+                print(f"[voice] Apollo over the converted stem failed ({exc}); mixing the plain stem", flush=True)
+            mark("apollo")
         job.stage = "Mezclando"
         out = job.dir / "output.mp3"
-        mix(converted, instrumental, out)
+        mix(converted, instrumental, out, spectrum_db=job.glue_spectrum_db, reverb=job.glue_reverb, deharsh_db=job.deharsh_db)
+        mark("mix")
+        print(f"[voice] job {job.id[:8]} done: steps {job.diffusion_steps}, cfg {job.cfg_rate}, ref {job.ref_seconds:g}s{' clean' if job.ref_denoise else ''}, "
+              f"glue ±{job.glue_spectrum_db:g} dB{'' if job.glue_reverb else ' dry'}{f', deharsh {job.deharsh_db:g} dB' if job.deharsh_db else ''}{', apollo' if job.enhance_vocals else ''}; timings {job.timings}", flush=True)
         job.output, job.status, job.stage = out, "done", "Listo"
     except Exception as exc:  # noqa: BLE001
         import traceback
@@ -592,8 +684,11 @@ def _run_job(job: Job) -> None:
         job.status, job.error, job.stage = "failed", f"{type(exc).__name__}: {exc}", "Error"
     finally:
         job.finished_at = time.time()
-        for p in ("song.wav", "vocals.wav", "instrumental.wav", "vocals_converted.wav"):
-            (job.dir / p).unlink(missing_ok=True)
+        keep = ("vocals.wav", "vocals_converted.wav", "vocals_enhanced.wav", "reference.wav", "ref_clean.wav") if job.keep_stems else ()
+        for p in ("song.wav", "vocals.wav", "instrumental.wav", "vocals_converted.wav", "vocals_enhanced.wav", "ref_stereo.wav", "ref_vocals.wav"):
+            if p not in keep:
+                (job.dir / p).unlink(missing_ok=True)
+        shutil.rmtree(job.dir / "refsep", ignore_errors=True)
 
 
 def load_apollo():
@@ -1139,6 +1234,14 @@ async def convert(
     autotune_strength: float = Form(0.8),
     key_scale: str = Form(""),
     ref_kind: str = Form("speech"),
+    cfg_rate: float = Form(0.7),
+    ref_denoise: bool = Form(False),
+    ref_seconds: float = Form(30.0),
+    glue_spectrum_db: float = Form(8.0),
+    glue_reverb: bool = Form(True),
+    enhance_vocals: bool = Form(False),
+    deharsh_db: float = Form(0.0),
+    keep_stems: bool = Form(False),
 ):
     job_id = str(uuid.uuid4())
     job_dir = WORK_DIR / job_id
@@ -1149,7 +1252,9 @@ async def convert(
         shutil.copyfileobj(song.file, f)
     with ref_path.open("wb") as f:
         shutil.copyfileobj(reference.file, f)
-    job = Job(id=job_id, dir=job_dir, song=song_path, reference=ref_path, pitch_shift=pitch_shift, diffusion_steps=max(5, min(diffusion_steps, 100)), auto_octave=auto_octave, autotune=autotune, autotune_strength=max(0.0, min(autotune_strength, 1.0)), key_scale=key_scale, ref_kind="singing" if ref_kind == "singing" else "speech")
+    job = Job(id=job_id, dir=job_dir, song=song_path, reference=ref_path, pitch_shift=pitch_shift, diffusion_steps=max(5, min(diffusion_steps, 100)), auto_octave=auto_octave, autotune=autotune, autotune_strength=max(0.0, min(autotune_strength, 1.0)), key_scale=key_scale, ref_kind="singing" if ref_kind == "singing" else "speech",
+              cfg_rate=max(0.0, min(cfg_rate, 1.0)), ref_denoise=ref_denoise, ref_seconds=max(5.0, min(ref_seconds, 30.0)), glue_spectrum_db=max(0.0, min(glue_spectrum_db, 12.0)),
+              glue_reverb=glue_reverb, enhance_vocals=enhance_vocals, deharsh_db=max(0.0, min(deharsh_db, 12.0)), keep_stems=keep_stems)
     jobs[job_id] = job
     queue.put(job)
     return {"job_id": job_id, "status": job.status, "queue_position": queue.qsize()}
@@ -1160,7 +1265,7 @@ def job_status(job_id: str):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, "job not found")
-    return {"job_id": job.id, "status": job.status, "stage": job.stage, "error": job.error, "octave_shift": job.octave_shift, "autotune": job.autotune}
+    return {"job_id": job.id, "status": job.status, "stage": job.stage, "error": job.error, "octave_shift": job.octave_shift, "autotune": job.autotune, "timings": job.timings}
 
 
 @app.get("/jobs/{job_id}/audio")

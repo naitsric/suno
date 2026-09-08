@@ -34,6 +34,8 @@ export const songs = sqliteTable("songs", {
   voiceJobId: text("voice_job_id"),
   /** Pitch-correct the sung voice during conversion (Seed-VC follows a tuned F0 curve). */
   autotune: integer("autotune", { mode: "boolean" }).notNull().default(false),
+  /** Conversion quality knobs sent to the voice service (JSON, see lib/voice-options.ts); null = service defaults. */
+  voiceOptions: text("voice_options"),
   /** Stills video (sequence of Pixar-style images + Ken Burns): none | queued | rendering | done | failed. */
   videoStatus: text("video_status").notNull().default("none"),
   videoJobId: text("video_job_id"),

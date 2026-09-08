@@ -1,6 +1,7 @@
 /** Client for the voice conversion service (engine/voice/server.py, port 8002). */
 import fs from "node:fs";
 import path from "node:path";
+import { conversionFormFields, type ConversionOptions } from "./voice-options";
 
 const BASE = (process.env.VOICE_URL ?? "http://127.0.0.1:8002").replace(/\/$/, "");
 
@@ -108,17 +109,22 @@ export async function sculptReference(referencePath: string, p: SculptParams): P
   return { wav: Buffer.from(await res.arrayBuffer()), info };
 }
 
-export async function submitConversion(songPath: string, referencePath: string, opts: { pitchShift?: number; diffusionSteps?: number; autoOctave?: boolean; autotune?: boolean; autotuneStrength?: number; keyScale?: string | null; refKind?: VoiceKind } = {}) {
+export async function submitConversion(
+  songPath: string,
+  referencePath: string,
+  opts: { pitchShift?: number; autoOctave?: boolean; autotune?: boolean; autotuneStrength?: number; keyScale?: string | null; refKind?: VoiceKind; options?: ConversionOptions } = {},
+) {
   const form = new FormData();
   form.append("song", new Blob([fs.readFileSync(songPath)]), path.basename(songPath));
   form.append("reference", new Blob([fs.readFileSync(referencePath)]), path.basename(referencePath));
   form.append("pitch_shift", String(opts.pitchShift ?? 0));
-  form.append("diffusion_steps", String(opts.diffusionSteps ?? 30));
   form.append("auto_octave", String(opts.autoOctave ?? true));
   form.append("autotune", String(opts.autotune ?? false));
   form.append("autotune_strength", String(opts.autotuneStrength ?? 0.8));
   form.append("key_scale", opts.keyScale ?? "");
   form.append("ref_kind", opts.refKind ?? "speech");
+  // Quality knobs (diffusion steps, CFG, reference cleanup, mix glue, Apollo): only the ones set travel.
+  for (const [k, v] of conversionFormFields(opts.options ?? {})) form.append(k, v);
   const res = await fetch(`${BASE}/convert`, { method: "POST", body: form });
   if (!res.ok) throw new Error(`Servicio de voz respondió ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return (await res.json()) as { job_id: string; status: string; queue_position: number };
