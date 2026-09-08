@@ -151,6 +151,10 @@ análisis tarda 3–5 min con el modelo de 12B y se cachea por fotografía + per
    ruidosa o apagada). Se guarda como `<id>.clean.wav`, el original se conserva y una casilla decide
    cuál se usa; el perfil de tono se vuelve a medir sobre la activa.
 
+   **Quitar voz** («Quitar voz» junto a «Reconvertir», `DELETE /api/songs/[id]/voice`): borra
+   `<id>.voice.*` y la canción vuelve a la voz con la que cantó el modelo (`<id>.mp3` / `<id>.raw.mp3`,
+   que nunca se tocan). Sirve también sobre una canción aún en conversión: el job se abandona.
+
    **Esculpir voz** (opcional, por voz, también para voces cantadas): «🎨 Esculpir voz» en la
    tarjeta → `POST /api/voices/[id]/sculpt {formant, pitch, brightness}` → `POST :8002/sculpt-reference`
    (`engine/voice/sculpt.py`, Praat «Change gender» vía parselmouth, CPU, ~10 s). `formant` mueve los

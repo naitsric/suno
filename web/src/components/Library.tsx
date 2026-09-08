@@ -204,6 +204,22 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
     }
   };
 
+  const dropVoice = async () => {
+    setReconverting(true);
+    setPpError(null);
+    try {
+      const res = await fetch(`/api/songs/${song.id}/voice`, { method: "DELETE" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "No se pudo quitar la voz");
+      setVoiceId("");
+      onUpdated(body.song as SongDTO);
+    } catch (err) {
+      setPpError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReconverting(false);
+    }
+  };
+
   const applyPostProduction = async () => {
     setProcessing(true);
     setPpError(null);
@@ -386,6 +402,11 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
                       <button onClick={reconvert} disabled={reconverting || !voiceId} className="rounded-md border border-accent-2/60 px-2 py-1 text-[11px] text-fg hover:bg-accent-2/20 disabled:opacity-40" title="Reconvierte desde el audio original del modelo">
                         {reconverting ? "Enviando…" : song.voiceId ? "Reconvertir" : "Convertir"}
                       </button>
+                      {song.voiceId && (
+                        <button onClick={dropVoice} disabled={reconverting} className="rounded-md border border-border px-2 py-1 text-[11px] text-muted hover:text-fg disabled:opacity-40" title="Vuelve a la voz con la que cantó el modelo; borra la conversión">
+                          Quitar voz
+                        </button>
+                      )}
                     </span>
                   </label>
                 )}

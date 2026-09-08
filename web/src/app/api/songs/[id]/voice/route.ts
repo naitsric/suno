@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { reconvertVoice } from "@/lib/songs";
+import { reconvertVoice, removeVoice } from "@/lib/songs";
 
 export const dynamic = "force-dynamic";
 
@@ -15,5 +15,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ song: reconvertVoice(id, parsed.data) });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "No se pudo reconvertir" }, { status: 400 });
+  }
+}
+
+/** Removes the converted vocals: the song goes back to the voice the model sang with. */
+export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  try {
+    return NextResponse.json({ song: removeVoice(id) });
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof Error ? err.message : "No se pudo quitar la voz" }, { status: 400 });
   }
 }

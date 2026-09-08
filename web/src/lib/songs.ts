@@ -502,6 +502,27 @@ export function reconvertVoice(id: string, opts: { autotune?: boolean; voiceId?:
   return getSong(id)!;
 }
 
+/**
+ * Drops the converted vocals and puts the song back to the model's own voice. The `.voice.*` files are
+ * deleted; the model's output (`<id>.mp3` / `<id>.raw.mp3`) is untouched. Works on a song still converting:
+ * its job is abandoned (the sync only follows rows in `converting`).
+ */
+export function removeVoice(id: string): Song {
+  const song = getSong(id);
+  if (!song) throw new Error("No existe");
+  if (!song.voiceId && !song.originalAudioFile) throw new Error("Esta canción no tiene voz convertida");
+  const modelMix = `${song.id}.mp3`;
+  const modelRaw = `${song.id}.raw.mp3`;
+  const audioFile = song.originalAudioFile && fs.existsSync(path.join(AUDIO_DIR, song.originalAudioFile)) ? song.originalAudioFile : fs.existsSync(path.join(AUDIO_DIR, modelMix)) ? modelMix : null;
+  if (!audioFile) throw new Error("No se conserva el audio original del modelo");
+  for (const f of [`${song.id}.voice.mp3`, `${song.id}.voice.raw.mp3`]) fs.rmSync(path.join(AUDIO_DIR, f), { force: true });
+  db.update(songs)
+    .set({ voiceId: null, voiceJobId: null, autotune: false, status: "done", progress: "", error: null, audioFile, originalAudioFile: null, rawAudioFile: fs.existsSync(path.join(AUDIO_DIR, modelRaw)) ? modelRaw : song.rawAudioFile, updatedAt: now() })
+    .where(eq(songs.id, id))
+    .run();
+  return getSong(id)!;
+}
+
 /** Turns a natural-language instruction into a concrete cover/repaint plan (Ollama, with a plain fallback). */
 export async function planSongEdit(id: string, instruction: string, range: { start: number | null; end: number | null }): Promise<EditPlan> {
   const song = getSong(id);
