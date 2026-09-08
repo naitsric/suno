@@ -91,6 +91,8 @@ function ensureSchema(sqlite: Database.Database) {
     ["edit_instruction", "edit_instruction TEXT"],
     ["autotune", "autotune INTEGER NOT NULL DEFAULT 0"],
     ["voice_options", "voice_options TEXT"],
+    ["voice_match_id", "voice_match_id TEXT"],
+    ["voice_similarity", "voice_similarity REAL"],
     ["video_status", "video_status TEXT NOT NULL DEFAULT 'none'"],
     ["video_job_id", "video_job_id TEXT"],
     ["video_file", "video_file TEXT"],
@@ -122,6 +124,16 @@ function ensureSchema(sqlite: Database.Database) {
     const cols = new Set((sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
     if (!cols.has("image_file")) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN image_file TEXT`);
     if (!cols.has("image_prompt")) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN image_prompt TEXT`);
+  }
+  const artistCols = new Set((sqlite.prepare("PRAGMA table_info(artists)").all() as { name: string }[]).map((c) => c.name));
+  for (const [col, ddl] of [
+    ["lora_status", "lora_status TEXT NOT NULL DEFAULT 'none'"],
+    ["lora_path", "lora_path TEXT"],
+    ["lora_progress", "lora_progress TEXT NOT NULL DEFAULT ''"],
+    ["lora_error", "lora_error TEXT"],
+    ["lora_tag", "lora_tag TEXT"],
+  ] as const) {
+    if (!artistCols.has(col)) sqlite.exec(`ALTER TABLE artists ADD COLUMN ${ddl}`);
   }
   sqlite.exec("CREATE INDEX IF NOT EXISTS songs_artist ON songs(artist_id)");
   // Songs generated before post-production existed were never processed.

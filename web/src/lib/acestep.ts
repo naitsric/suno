@@ -16,7 +16,9 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`ACE-Step ${path} respondió ${res.status}: ${text.slice(0, 200)}`);
   }
   if (!res.ok || (body.code && body.code !== 200)) {
-    throw new Error(body.error ?? `ACE-Step ${path} respondió ${res.status}`);
+    // FastAPI's HTTPException puts the reason in `detail`, outside the envelope.
+    const detail = (body as unknown as { detail?: unknown }).detail;
+    throw new Error(body.error ?? (typeof detail === "string" ? detail : null) ?? `ACE-Step ${path} respondió ${res.status}`);
   }
   return body.data;
 }
@@ -176,4 +178,85 @@ export async function releaseEditTask(params: EditParams, srcAudio: { buffer: Bu
   const body = (await res.json().catch(() => null)) as Envelope<{ task_id: string; status: string; queue_position?: number }> | null;
   if (!res.ok || !body || (body.code && body.code !== 200)) throw new Error(body?.error ?? `ACE-Step /release_task respondió ${res.status}`);
   return body.data;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// LoRA per artist: dataset → tensors → training → export → load (all local, engine/ACE-Step-1.5 docs/en/API.md)
+// ---------------------------------------------------------------------------------------------------
+function json(body: unknown): RequestInit {
+  return { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+}
+
+export type DatasetSample = { idx?: number; filename?: string; audio_path?: string; caption?: string; genre?: string; lyrics?: string; bpm?: number | null; keyscale?: string; language?: string; is_instrumental?: boolean };
+
+/** Scans a folder of audio (+ `<name>.lyrics.txt` / `<name>.caption.txt` sidecars) into the engine's in-memory dataset. */
+export async function datasetScan(audioDir: string, datasetName: string, customTag: string) {
+  return call<{ num_samples: number; samples: DatasetSample[] }>("/v1/dataset/scan", json({ audio_dir: audioDir, dataset_name: datasetName, custom_tag: customTag, tag_position: "prepend", all_instrumental: false }));
+}
+
+export async function datasetUpdateSample(idx: number, sample: { caption: string; genre: string; lyrics: string; bpm: number | null; keyscale: string; language: string }) {
+  return call<unknown>(`/v1/dataset/sample/${idx}`, { ...json({ sample_idx: idx, ...sample, prompt_override: null, timesignature: "", is_instrumental: false }), method: "PUT" });
+}
+
+export async function datasetSave(savePath: string, datasetName: string) {
+  return call<{ message: string; save_path: string }>("/v1/dataset/save", json({ save_path: savePath, dataset_name: datasetName }));
+}
+
+export async function datasetPreprocessStart(outputDir: string) {
+  return call<{ task_id: string }>("/v1/dataset/preprocess_async", json({ output_dir: outputDir, skip_existing: true }));
+}
+
+export type PreprocessStatus = { task_id: string | null; status: "idle" | "running" | "completed" | "failed" | string; progress: string; current?: number; total?: number; error?: string | null; result?: unknown };
+
+export async function datasetPreprocessStatus(taskId: string) {
+  return call<PreprocessStatus>(`/v1/dataset/preprocess_status/${taskId}`);
+}
+
+export type TrainingParams = { tensor_dir: string; lora_output_dir: string; train_epochs: number; lora_rank: number; lora_alpha: number; learning_rate: number; save_every_n_epochs: number; gradient_checkpointing: boolean };
+
+export async function trainingStart(params: TrainingParams) {
+  return call<unknown>("/v1/training/start", json({ lora_dropout: 0.1, train_batch_size: 1, gradient_accumulation: 4, training_shift: 3.0, training_seed: 42, use_fp8: false, ...params }));
+}
+
+export type TrainingStatus = { is_training: boolean; should_stop: boolean; current_step: number; current_loss: number | null; status: string; current_epoch: number; steps_per_second: number; estimated_time_remaining: number; error: string | null; config?: Record<string, unknown> };
+
+export async function trainingStatus() {
+  return call<TrainingStatus>("/v1/training/status");
+}
+
+export async function trainingStop() {
+  return call<unknown>("/v1/training/stop", json({}));
+}
+
+export async function trainingExport(loraOutputDir: string, exportPath: string) {
+  return call<{ message: string; export_path: string }>("/v1/training/export", json({ lora_output_dir: loraOutputDir, export_path: exportPath }));
+}
+
+/** Reloads the engine's models (used to bring its LM back after a training run unloaded it). Slow (~1–2 min). */
+export async function reinitialize() {
+  return call<unknown>("/v1/reinitialize", json({}));
+}
+
+/** Adds a PEFT adapter under `adapterName` (unique per artist) and makes it the active one. */
+export async function loadLora(loraPath: string, adapterName?: string) {
+  return call<{ message: string }>("/v1/lora/load", json({ lora_path: loraPath, adapter_name: adapterName ?? null }));
+}
+
+export type LoraStatus = { lora_loaded: boolean; use_lora: boolean; lora_scale: number; active_adapter: string | null; adapters: string[]; scales: Record<string, number> };
+
+export async function loraStatus() {
+  return call<LoraStatus>("/v1/lora/status");
+}
+
+/** Enables/disables the loaded adapters for inference (PEFT enable/disable_adapter_layers). */
+export async function toggleLora(useLora: boolean) {
+  return call<unknown>("/v1/lora/toggle", json({ use_lora: useLora }));
+}
+
+export async function unloadLora() {
+  return call<unknown>("/v1/lora/unload", json({}));
+}
+
+export async function setLoraScale(scale: number) {
+  return call<unknown>("/v1/lora/scale", json({ scale }));
 }

@@ -20,6 +20,11 @@ const CreateSchema = z.object({
   autotune: z.boolean().default(false),
   /** Conversion quality knobs (see lib/voice-options.ts); omitted = service defaults. */
   voiceOptions: ConversionOptionsSchema.nullable().optional(),
+  /** Generations per creation (default 2). With `voiceMatchId`, each one is scored against that voice. */
+  variants: z.number().int().min(1).max(6).optional(),
+  voiceMatchId: z.string().nullable().optional(),
+  /** Generate with the artist's trained LoRA (see lib/lora.ts). */
+  useLora: z.boolean().optional(),
   master: z.enum(MASTER_PRESETS).default("off"),
   artistId: z.string().nullable().optional(),
   albumId: z.string().nullable().optional(),

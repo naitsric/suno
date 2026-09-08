@@ -267,6 +267,17 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
                 {song.title}
                 <span className="ml-2 text-xs text-muted">v{song.variant + 1}</span>
                 {song.originalAudioFile && <span className="ml-2 rounded-full bg-accent/20 px-2 py-0.5 text-[10px] text-accent" title="Cantada con tu voz">🎤 mi voz</span>}
+                {song.voiceMatchId ? (
+                  <span className="ml-2 rounded-full bg-panel-2 px-2 py-0.5 text-[10px] text-muted" title="Parecido del cantante generado (sin convertir) con la voz del artista: similitud de embeddings de voz; ≈ 80 %+ es el mismo cantante, ~70 % otro cantante del mismo registro">
+                    🎯 {song.voiceSimilarity == null ? "midiendo…" : `parecido ${Math.round(song.voiceSimilarity * 100)} %`}
+                  </span>
+                ) : (
+                  song.status === "done" && !song.instrumental && songArtist?.defaultVoiceId && (
+                    <button type="button" onClick={() => fetch(`/api/songs/${song.id}/voice-match`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ voiceId: songArtist.defaultVoiceId }) }).then(async (r) => { const b = await r.json(); if (r.ok) onUpdated(b.song); else onError(b.error ?? "No se pudo medir"); })} className="ml-2 rounded-full bg-panel-2 px-2 py-0.5 text-[10px] text-muted hover:text-fg" title="Medir cuánto se parece el cantante de esta generación a la voz del artista (~30 s)">
+                      🎯 medir parecido
+                    </button>
+                  )
+                )}
                 {song.status === "done" && song.rawAudioFile && (song.enhanced || song.masterPreset !== "off") && (
                   <span className="ml-2 rounded-full bg-accent-2/20 px-2 py-0.5 text-[10px] text-accent-2" title="Post-producción aplicada">
                     ✨ {[song.enhanced ? "Realce IA" : null, song.masterPreset !== "off" ? MASTER_LABELS[song.masterPreset as MasterPreset]?.split(" ")[0] : null].filter(Boolean).join(" + ")}

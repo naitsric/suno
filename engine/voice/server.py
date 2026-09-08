@@ -24,9 +24,12 @@ REST API (port 8002):
   POST /reference-analysis multipart: url (YouTube) | audio, [token] → JSON: what the song sounds like (tempo, key,
                            energy, structure, stems, vocals + language, CLAP genre/mood/instrument tags); see reference.py
   GET  /reference-analysis/{token} -> {stage} while an analysis with that token runs
+  POST /voice-similarity   multipart: audio (song or stem), reference (voice), [is_stem] → {similarity}: cosine of
+                           CAMPPlus speaker embeddings (pick the generation whose singer is closest to a voice)
   POST /convert            multipart: song (audio), reference (audio), [pitch_shift], [diffusion_steps], [auto_octave],
                            [autotune], [autotune_strength], [key_scale], [ref_kind], [cfg_rate], [ref_denoise],
-                           [ref_seconds], [glue_spectrum_db], [glue_reverb], [enhance_vocals], [deharsh_db], [keep_stems]
+                           [ref_seconds], [glue_spectrum_db], [glue_reverb], [enhance_vocals], [deharsh_db],
+                           [keep_highs_hz], [keep_stems]
                            (autotune = the song's F0 is snapped to the nearest scale note before conditioning
                            Seed-VC, so the sung pitch comes out in tune; the rest are quality knobs, see Job)
   GET  /jobs/{id}          -> {status: queued|running|done|failed, stage, error, octave_shift}
@@ -90,6 +93,7 @@ class Job:
     glue_reverb: bool = True  # synthetic reverb at the measured wet level of the original stem
     enhance_vocals: bool = False  # Apollo restoration over the converted stem before mixing
     deharsh_db: float = 0.0  # attenuate the non-harmonic (noisy) part of the converted stem above 2.5 kHz by this much
+    keep_highs_hz: float = 0.0  # hybrid: converted vocal below this frequency, the original stem's highs above it (0 = off)
     keep_stems: bool = False  # keep vocals.wav / vocals_converted.wav in the job dir (for A/B measurements)
     timings: dict = field(default_factory=dict)  # stage → seconds
     status: str = "queued"
@@ -529,10 +533,28 @@ def soften_noise(conv: np.ndarray, att_db: float, f_lo: float = 2500.0) -> np.nd
     return librosa.istft(H + P * g[:, None], hop_length=512, length=len(conv)).astype(np.float32)
 
 
-def mix(vocals_wav: Path, instrumental_wav: Path, out_mp3: Path, spectrum_db: float = 8.0, reverb: bool = True, deharsh_db: float = 0.0) -> None:
+def band_hybrid(conv: np.ndarray, orig: np.ndarray, crossover_hz: float) -> np.ndarray:
+    """Converted vocal below `crossover_hz` + the original stem above it (Linkwitz-Riley 4th order, so the two
+    halves sum flat). The timbre identity lives in the formants below ~4 kHz, while Seed-VC's synthetic texture
+    (+6 dB of noisy energy) lives above 3 kHz: keeping the original singer's air, sibilants and shouts removes
+    the vocoder from the band where it hurts. The highs are still the model's singer, so this is a trade-off."""
+    from scipy.signal import butter, sosfiltfilt
+
+    n = min(len(conv), len(orig))
+    lo = butter(2, crossover_hz, btype="low", fs=SR, output="sos")
+    hi = butter(2, crossover_hz, btype="high", fs=SR, output="sos")
+    low = sosfiltfilt(lo, conv[:n].astype(np.float64))  # filtfilt = squared 2nd-order Butterworth = LR4
+    high = sosfiltfilt(hi, orig[:n].astype(np.float64))
+    out = conv.copy()
+    out[:n] = (low + high).astype(np.float32)
+    return out
+
+
+def mix(vocals_wav: Path, instrumental_wav: Path, out_mp3: Path, spectrum_db: float = 8.0, reverb: bool = True, deharsh_db: float = 0.0, keep_highs_hz: float = 0.0) -> None:
     """Mixes the converted vocal back, glued to the space of the original vocal stem:
-    [soften the noisy highs by `deharsh_db`] → spectral match (up to `spectrum_db`; 0 skips it) → loudness-envelope
-    match → reverb at the original's measured wet level (optional) → sum."""
+    [soften the noisy highs by `deharsh_db`] → [band hybrid with the original above `keep_highs_hz`] → spectral match
+    (up to `spectrum_db`; 0 skips it) → loudness-envelope match → reverb at the original's measured wet level
+    (optional) → sum."""
     voc, sr_v = sf.read(vocals_wav, dtype="float32", always_2d=True)
     inst, sr_i = sf.read(instrumental_wav, dtype="float32", always_2d=True)
     assert sr_v == SR and sr_i == SR, (sr_v, sr_i)
@@ -542,6 +564,8 @@ def mix(vocals_wav: Path, instrumental_wav: Path, out_mp3: Path, spectrum_db: fl
     try:
         if deharsh_db > 0:
             mono = soften_noise(mono, deharsh_db)
+        if keep_highs_hz > 0:
+            mono = band_hybrid(mono, orig_mono, keep_highs_hz)
         if spectrum_db > 0:
             mono = match_spectrum(mono, orig_mono, max_db=spectrum_db)
         mono = match_envelope(mono, orig_mono)
@@ -672,10 +696,10 @@ def _run_job(job: Job) -> None:
             mark("apollo")
         job.stage = "Mezclando"
         out = job.dir / "output.mp3"
-        mix(converted, instrumental, out, spectrum_db=job.glue_spectrum_db, reverb=job.glue_reverb, deharsh_db=job.deharsh_db)
+        mix(converted, instrumental, out, spectrum_db=job.glue_spectrum_db, reverb=job.glue_reverb, deharsh_db=job.deharsh_db, keep_highs_hz=job.keep_highs_hz)
         mark("mix")
         print(f"[voice] job {job.id[:8]} done: steps {job.diffusion_steps}, cfg {job.cfg_rate}, ref {job.ref_seconds:g}s{' clean' if job.ref_denoise else ''}, "
-              f"glue ±{job.glue_spectrum_db:g} dB{'' if job.glue_reverb else ' dry'}{f', deharsh {job.deharsh_db:g} dB' if job.deharsh_db else ''}{', apollo' if job.enhance_vocals else ''}; timings {job.timings}", flush=True)
+              f"glue ±{job.glue_spectrum_db:g} dB{'' if job.glue_reverb else ' dry'}{f', deharsh {job.deharsh_db:g} dB' if job.deharsh_db else ''}{f', highs from original > {job.keep_highs_hz:g} Hz' if job.keep_highs_hz else ''}{', apollo' if job.enhance_vocals else ''}; timings {job.timings}", flush=True)
         job.output, job.status, job.stage = out, "done", "Listo"
     except Exception as exc:  # noqa: BLE001
         import traceback
@@ -1223,6 +1247,71 @@ def reference_progress(token: str):
     return {"stage": _reference_progress.get(token)}
 
 
+def voice_embedding(wav_path: Path, max_windows: int = 4, window_s: float = 20.0) -> np.ndarray:
+    """Speaker embedding (CAMPPlus, 192-d, L2-normalised) of a vocal recording: the loudest `max_windows`
+    windows of `window_s` are embedded separately and averaged (long inputs, and silence, would otherwise
+    dominate the statistics). Same encoder Seed-VC uses for its timbre prompt."""
+    import librosa
+    import torchaudio
+
+    vc, _ = load_models()
+    y, _ = librosa.load(str(wav_path), sr=16000, mono=True)
+    win = int(16000 * window_s)
+    if len(y) <= win:
+        starts = [0]
+    else:
+        hop = win // 2
+        energy = [(float(np.mean(y[i : i + win] ** 2)), i) for i in range(0, len(y) - win + 1, hop)]
+        energy.sort(reverse=True)
+        starts = sorted(i for _, i in energy[:max_windows])
+    embs = []
+    with torch.inference_mode():
+        for s in starts:
+            seg = torch.from_numpy(y[s : s + win]).float()[None].to(DEVICE)
+            feat = torchaudio.compliance.kaldi.fbank(seg, num_mel_bins=80, dither=0, sample_frequency=16000)
+            feat = feat - feat.mean(dim=0, keepdim=True)
+            emb = vc.campplus_model(feat.unsqueeze(0))[0].float().cpu().numpy()
+            embs.append(emb / (np.linalg.norm(emb) + 1e-9))
+    mean = np.mean(embs, axis=0)
+    return mean / (np.linalg.norm(mean) + 1e-9)
+
+
+@app.post("/voice-similarity")
+def voice_similarity(audio: UploadFile = File(...), reference: UploadFile = File(...), is_stem: bool = Form(False)):
+    """How much the singer of `audio` (a full song, or a vocal stem with is_stem=true) sounds like `reference`
+    (a voice file): cosine similarity of CAMPPlus speaker embeddings, in [-1, 1] (same singer ≈ 0.8+, a
+    different singer of the same register ≈ 0.4–0.6). Used to pick, among several generations, the one
+    whose voice is closest to an artist's voice instead of converting it."""
+    job_dir = WORK_DIR / f"similarity-{uuid.uuid4()}"
+    job_dir.mkdir(parents=True)
+    src = job_dir / f"song{Path(audio.filename or 'song.mp3').suffix or '.mp3'}"
+    ref = job_dir / f"ref{Path(reference.filename or 'ref.wav').suffix or '.wav'}"
+    with src.open("wb") as f:
+        shutil.copyfileobj(audio.file, f)
+    with ref.open("wb") as f:
+        shutil.copyfileobj(reference.file, f)
+    try:
+        t0 = time.time()
+        song = job_dir / "song44.wav"
+        ffmpeg("-i", str(src), "-ac", "2", "-ar", str(SR), str(song))
+        ref_wav = job_dir / "ref44.wav"
+        ffmpeg("-i", str(ref), "-ac", "1", "-ar", str(SR), "-t", "60", str(ref_wav))
+        load_models()
+        with _gpu_lock:
+            vocals = song if is_stem else separate(song, job_dir)[0]
+            e_song, e_ref = voice_embedding(vocals), voice_embedding(ref_wav)
+        sim = float(np.dot(e_song, e_ref))
+        print(f"[voice] similarity {sim:.3f} ({time.time() - t0:.0f} s)", flush=True)
+        return {"similarity": round(sim, 4), "seconds": round(time.time() - t0, 1)}
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
 @app.post("/convert")
 async def convert(
     song: UploadFile = File(...),
@@ -1241,6 +1330,7 @@ async def convert(
     glue_reverb: bool = Form(True),
     enhance_vocals: bool = Form(False),
     deharsh_db: float = Form(0.0),
+    keep_highs_hz: float = Form(0.0),
     keep_stems: bool = Form(False),
 ):
     job_id = str(uuid.uuid4())
@@ -1254,7 +1344,7 @@ async def convert(
         shutil.copyfileobj(reference.file, f)
     job = Job(id=job_id, dir=job_dir, song=song_path, reference=ref_path, pitch_shift=pitch_shift, diffusion_steps=max(5, min(diffusion_steps, 100)), auto_octave=auto_octave, autotune=autotune, autotune_strength=max(0.0, min(autotune_strength, 1.0)), key_scale=key_scale, ref_kind="singing" if ref_kind == "singing" else "speech",
               cfg_rate=max(0.0, min(cfg_rate, 1.0)), ref_denoise=ref_denoise, ref_seconds=max(5.0, min(ref_seconds, 30.0)), glue_spectrum_db=max(0.0, min(glue_spectrum_db, 12.0)),
-              glue_reverb=glue_reverb, enhance_vocals=enhance_vocals, deharsh_db=max(0.0, min(deharsh_db, 12.0)), keep_stems=keep_stems)
+              glue_reverb=glue_reverb, enhance_vocals=enhance_vocals, deharsh_db=max(0.0, min(deharsh_db, 12.0)), keep_highs_hz=0.0 if keep_highs_hz <= 0 else max(1000.0, min(keep_highs_hz, 12000.0)), keep_stems=keep_stems)
     jobs[job_id] = job
     queue.put(job)
     return {"job_id": job_id, "status": job.status, "queue_position": queue.qsize()}

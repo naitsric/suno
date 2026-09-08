@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -14,6 +14,7 @@ import { masterAudio, type MasterPreset } from "./master";
 import { analyzeVoice, getVoice, voiceKind, voicePath, voiceProfile, voiceRegister } from "./voices";
 import { applyGender, applyRegister, genderInStyle, voiceBrief, voicePromptTags, type Register } from "./voice-register";
 import { artistImagePath, getAlbum, getArtist } from "./artists";
+import { applyLoraForGeneration } from "./lora";
 import { generateImage, generateImageWithReference, openaiConfigured } from "./openai-images";
 
 const PORTRAITS_DIR = process.env.PORTRAITS_DIR ?? "./data/portraits";
@@ -35,6 +36,12 @@ export type CreateSongInput = {
   autotune?: boolean;
   /** Conversion quality knobs (see lib/voice-options.ts); omitted = service defaults. */
   voiceOptions?: ConversionOptions | null;
+  /** Number of generations (1–6; default 2). More candidates = more chances one sings like the artist. */
+  variants?: number;
+  /** Score each generation's singer against this voice (no conversion): the closest one is the keeper. */
+  voiceMatchId?: string | null;
+  /** Generate with the artist's trained LoRA (needs `artists.lora_status = done`): the model sings with that voice. */
+  useLora?: boolean;
   master?: MasterPreset;
   artistId?: string | null;
   albumId?: string | null;
@@ -114,13 +121,21 @@ export async function createSong(input: CreateSongInput): Promise<Song[]> {
   const params: engine.GenerateParams = sampleQuery
     ? { prompt: "", lyrics: "", sample_query: sampleQuery, thinking: true, audio_duration: input.duration ?? null, vocal_language: input.vocalLanguage, model: input.model ?? null }
     : { prompt: style, lyrics, audio_duration: input.duration ?? null, vocal_language: input.vocalLanguage, model: input.model ?? null };
-  params.batch_size = VARIANTS;
+  const variants = Math.max(1, Math.min(input.variants ?? VARIANTS, 6));
+  params.batch_size = variants;
   if (input.bpm) params.bpm = input.bpm;
   if (input.keyScale) params.key_scale = input.keyScale;
 
+  // Artist LoRA: the engine holds one adapter globally, so it is (un)loaded right before every task.
+  const loraTag = await applyLoraForGeneration(input.artistId ? getArtist(input.artistId) : undefined, !!input.useLora);
+  if (loraTag) {
+    if (params.sample_query) params.sample_query = `${loraTag}, ${params.sample_query}`;
+    else params.prompt = `${loraTag}, ${params.prompt}`;
+  }
   const task = await engine.releaseTask(params);
   const ts = now();
-  const rows = Array.from({ length: VARIANTS }, (_, variant) => ({
+  const voiceMatchId = !input.instrumental && input.voiceMatchId && getVoice(input.voiceMatchId) ? input.voiceMatchId : null;
+  const rows = Array.from({ length: variants }, (_, variant) => ({
     id: randomUUID(),
     taskId: task.task_id,
     variant,
@@ -136,6 +151,7 @@ export async function createSong(input: CreateSongInput): Promise<Song[]> {
     voiceId: input.instrumental ? null : input.voiceId ?? null,
     autotune: !!input.autotune && !input.instrumental && !!input.voiceId,
     voiceOptions: input.voiceOptions && Object.keys(input.voiceOptions).length ? JSON.stringify(input.voiceOptions) : null,
+    voiceMatchId,
     masterPreset: input.master ?? "off",
     artistId: input.artistId ?? null,
     albumId: input.albumId ?? null,
@@ -184,6 +200,53 @@ export async function syncPending(): Promise<void> {
   await syncGeneration();
   await syncVoiceConversion();
   await syncVideos();
+  void syncVoiceMatch(); // scores in the background: the poll must not wait 30 s for Demucs
+}
+
+let voiceMatchInFlight = false;
+
+/**
+ * Scores finished songs that asked for a voice match: the model's own vocals (`<id>.raw.mp3`, never the
+ * converted mix) against the chosen voice, one song at a time. The score lands on a later poll.
+ */
+async function syncVoiceMatch(): Promise<void> {
+  if (voiceMatchInFlight) return;
+  const row = db
+    .select()
+    .from(songs)
+    .where(and(eq(songs.status, "done"), isNotNull(songs.voiceMatchId), isNull(songs.voiceSimilarity)))
+    .limit(1)
+    .get();
+  if (!row?.voiceMatchId) return;
+  voiceMatchInFlight = true;
+  try {
+    const v = getVoice(row.voiceMatchId);
+    const raw = path.join(AUDIO_DIR, `${row.id}.raw.mp3`);
+    const src = fs.existsSync(raw) ? raw : row.audioFile ? path.join(AUDIO_DIR, row.audioFile) : null;
+    if (!v || !src) {
+      db.update(songs).set({ voiceMatchId: null, updatedAt: now() }).where(eq(songs.id, row.id)).run();
+      return;
+    }
+    const similarity = await voice.voiceSimilarity(src, voicePath(v));
+    db.update(songs).set({ voiceSimilarity: similarity, updatedAt: now() }).where(eq(songs.id, row.id)).run();
+  } catch (err) {
+    // Leave it unscored (retried on the next poll) but say why on the card.
+    const msg = err instanceof Error ? err.message : String(err);
+    db.update(songs).set({ error: `Parecido de voz: ${msg}`.slice(0, 300), updatedAt: now() }).where(eq(songs.id, row.id)).run();
+  } finally {
+    voiceMatchInFlight = false;
+  }
+}
+
+/** Asks for (or re-does) the voice-similarity score of a finished song against `voiceId`. */
+export function requestVoiceMatch(id: string, voiceId: string): Song {
+  const song = getSong(id);
+  if (!song) throw new Error("No existe");
+  if (song.status !== "done") throw new Error("La canción aún no está lista");
+  if (!getVoice(voiceId)) throw new Error("Esa voz no existe");
+  db.update(songs).set({ voiceMatchId: voiceId, voiceSimilarity: null, updatedAt: now() }).where(eq(songs.id, id)).run();
+  void syncVoiceMatch();
+  return getSong(id)!;
 }
 
 /**

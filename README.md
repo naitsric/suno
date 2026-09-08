@@ -208,6 +208,7 @@ análisis tarda 3–5 min con el modelo de 12B y se cachea por fotografía + per
    | `glueReverb` | `glue_reverb` | true | reverberación sintética al nivel medido |
    | `enhanceVocals` | `enhance_vocals` | false | Apollo sobre el stem convertido antes de mezclar |
    | `deharshDb` | `deharsh_db` | 0 | atenúa en dB la parte no armónica (HPSS) del stem convertido por encima de 2.5 kHz |
+   | `keepHighsHz` | `keep_highs_hz` | 0 | **híbrido por bandas**: voz convertida por debajo de esa frecuencia y agudos del stem original por encima (cruce Linkwitz-Riley) |
 
    `keep_stems=true` (solo en `/convert`) conserva `vocals.wav`, `vocals_converted.wav` y la referencia en
    `engine/voice/.cache/jobs/<job>/` para medir; `GET /jobs/{id}` devuelve `timings` por etapa.
@@ -223,11 +224,50 @@ análisis tarda 3–5 min con el modelo de 12B y se cachea por fotografía + per
    > y F0 algo peor; referencia de 10 s → peor (HNR 9.2); referencia con 2º Demucs + DeEcho → sin
    > cambio (solo había −42 dB de instrumentos colados); `match_spectrum` a 3 dB o quitado → solo cambia
    > el balance (+3.5 dB de presencia), no la textura; `deharshDb: 4` → HNR 13.6 (= original) y
-   > planitud 0.23 sin tocar el F0. El modelo de canto ya es el de 44.1 kHz con BigVGAN 44k, así que no
-   > hay vocoder mejor que cargar. Si con estos mandos sigue sonando sintético, el siguiente paso es
+   > planitud 0.23 sin tocar el F0; `keepHighsHz: 3000` → HNR 14.3, log-mel 5.6 dB y la banda 5–10 kHz
+   > casi idéntica al original (LSD 1.7 frente a 11.4), porque esa banda ya no pasa por el vocoder (a cambio,
+   > el aire y las sibilantes son del cantante original). El modelo de canto ya es el de 44.1 kHz con
+   > BigVGAN 44k, así que no hay vocoder mejor que cargar. Si con estos mandos sigue sonando sintético, el siguiente paso es
    > fine-tuning de Seed-VC con la voz del artista (`engine/voice/seed-vc/train.py`, preset
    > `config_dit_mel_seed_uvit_whisper_base_f0_44k.yml`, carpeta con los stems de voz de sus canciones,
    > ~100–500 pasos en MPS) o un LoRA del artista en ACE-Step para que el motor cante ya con esa voz.
+   **Elegir en vez de convertir** («Elegir la generación más parecida» y «candidatos» en el panel de crear;
+   `variants` 1–6 y `voiceMatchId` en `POST /api/songs`; `POST /api/songs/[id]/voice-match {voiceId}` para una
+   canción hecha, o «🎯 medir parecido» en la tarjeta). Cada generación tiene un cantante aleatorio, así que
+   en vez de re-sintetizar la voz se generan varias y se mide cuál canta ya como la voz del artista:
+   `POST :8002/voice-similarity` separa la voz con Demucs y compara embeddings de locutor CAMPPlus (el mismo
+   codificador que Seed-VC usa para el timbre), coseno en `songs.voice_similarity` (🎯 en la tarjeta, se rellena
+   en un poll posterior; ~10 s por canción). Escala medida: la propia canción de la que salió la voz 0.89,
+   otros cantantes sintéticos del mismo registro 0.72–0.74, una voz hablada 0.37; cuatro candidatos de la
+   misma letra dieron 0.74–0.85. Con ≥ 0.8 el cantante es "el mismo" y no hace falta convertir: cero pérdida
+   de calidad a cambio de tiempo de motor (4 candidatos de 2 min ≈ 4 min). Se puede combinar con la conversión
+   (la puntuación se mide siempre sobre el crudo del modelo).
+
+   **Voz entrenada en el motor (LoRA por artista)** (perfil del artista → «Entrenar la voz (LoRA)»;
+   `POST/GET/DELETE /api/artists/[id]/lora {epochs?, rank?}`; `web/src/lib/lora.ts`). ACE-Step aprende la voz
+   del artista de sus propias canciones y las nuevas salen cantadas con ella desde el modelo, sin Demucs, sin
+   Seed-VC y sin vocoder. Material: las canciones terminadas con letra cuyo cantante *es* la voz del artista
+   (la canción de la que se extrajo la voz por defecto y las puntuadas ≥ 0.8 contra ella); nunca las mezclas
+   convertidas, porque el LoRA aprendería la textura de Seed-VC. Pipeline dentro del motor (todo local):
+   `<id>.raw.mp3` + `<id>.lyrics.txt` + `<id>.caption.txt` → `/v1/dataset/scan` (tag de activación
+   `<artista>_voice`) → metadatos por muestra (bpm, tonalidad, idioma) → `/v1/dataset/save` →
+   `/v1/dataset/preprocess_async` → `/v1/training/start` (LoRA sobre el decoder; el motor descarga su LM y
+   los codificadores mientras entrena, así que **no genera durante el entrenamiento**; se rechaza si hay
+   canciones en cola) → `/v1/training/export` → `artists.lora_path`. Archivos en
+   `engine/ACE-Step-1.5/.cache/lora/<artistId>/` (el motor solo acepta rutas bajo su propio directorio,
+   `path_safety.py`). Al crear con «🧬 Cantar con el LoRA» (`useLora`) la web añade el adaptador con
+   `/v1/lora/load {lora_path, adapter_name: <tag>}` justo antes de `release_task` (queda activo) y antepone
+   el tag al estilo; las canciones sin LoRA desactivan las capas con `/v1/lora/toggle false`. El estado se
+   lee siempre de `/v1/lora/status`, nunca de memoria de la web.
+
+   Gotchas del motor, medidos en el humo de 2 épocas (3 canciones, 3 pasos, 2 min en MPS, 22 M parámetros):
+   el export copia `final/` y el adaptador PEFT está en `export/adapter/` (es esa carpeta la que acepta
+   `/v1/lora/load`); tras entrenar el motor deja el decoder envuelto por PEFT sin copia base (`unload` falla
+   con «Base decoder backup not found») y con el LM descargado; `/v1/reinitialize` recarga el LM pero no
+   limpia el decoder, así que la web lo llama tras cada entrenamiento y, si hace falta cambiar de artista con
+   LoRA, hay que reiniciar el motor (`make engine`). 2 épocas no cambian la voz: dos canciones generadas
+   con ese LoRA puntuaron 0.76–0.77 contra la voz de Valentín, dentro del rango sin LoRA (0.74–0.85); para
+   que se note hacen falta 10+ épocas (≈ 1–3 h) y más canciones del mismo cantante.
 4. El resultado sustituye al audio de la canción; la versión original queda disponible con
    `?original` y en el botón «orig.» de la tarjeta. Si la conversión falla, la canción se conserva
    con la voz original y se muestra el error.

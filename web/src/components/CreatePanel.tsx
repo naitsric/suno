@@ -23,6 +23,10 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
   const [autoDuration, setAutoDuration] = useState(true);
   const [model, setModel] = useState<string>("");
   const [useVoice, setUseVoice] = useState(false);
+  /** convert = Seed-VC over the generation; match = generate several and score which singer is closest (no conversion). */
+  const [voiceMode, setVoiceMode] = useState<"convert" | "match">("convert");
+  const [variants, setVariants] = useState(2);
+  const [useLora, setUseLora] = useState(false);
   const [autotune, setAutotune] = useState(false);
   const [voiceId, setVoiceId] = useState<string>("");
   const [albumId, setAlbumId] = useState<string>("");
@@ -88,8 +92,11 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
           duration: autoDuration ? null : duration,
           vocalLanguage: language,
           model: model || null,
-          voiceId: useVoice && !instrumental && selectedVoice ? selectedVoice.id : null,
-          autotune: useVoice && !instrumental && !!selectedVoice && autotune,
+          voiceId: useVoice && !instrumental && selectedVoice && voiceMode === "convert" ? selectedVoice.id : null,
+          autotune: useVoice && !instrumental && !!selectedVoice && voiceMode === "convert" && autotune,
+          voiceMatchId: useVoice && !instrumental && selectedVoice ? selectedVoice.id : null,
+          useLora: !!artist && artist.loraStatus === "done" && useLora,
+          variants: useVoice && !instrumental && selectedVoice ? variants : undefined,
           artistId: artist?.id ?? null,
           albumId: artist && albumId ? albumId : null,
           bpm: referenceMeta?.bpm ?? null,
@@ -211,6 +218,15 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
         <Toggle checked={instrumental} onChange={setInstrumental} />
       </label>
 
+      {!instrumental && artist?.loraStatus === "done" && (
+        <label className="flex items-center justify-between rounded-lg border border-border bg-panel px-3 py-2.5 text-sm" title={`El motor genera ya con la voz aprendida de ${artist.name} (tag «${artist.loraTag ?? ""}»), sin conversión`}>
+          <span>
+            <span className="block">🧬 Cantar con el LoRA de {artist.name}</span>
+            <span className="block text-[11px] text-muted">La voz sale del modelo, sin Seed-VC ni vocoder. Se puede combinar con «elegir la más parecida».</span>
+          </span>
+          <Toggle checked={useLora} onChange={setUseLora} />
+        </label>
+      )}
       {!instrumental && (
         <div className="rounded-lg border border-border bg-panel px-3 py-2.5 text-sm">
           <label className="flex items-center justify-between">
@@ -229,8 +245,20 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
                     <option key={v.id} value={v.id}>{v.name}</option>
                   ))}
                 </select>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <select value={voiceMode} onChange={(e) => setVoiceMode(e.target.value as "convert" | "match")} className={inputCls} title="Convertir: Seed-VC re-sintetiza la voz (puede sonar sintética). Elegir: se generan varias y se mide cuál canta más parecido, sin convertir.">
+                    <option value="convert">Convertir la voz (Seed-VC)</option>
+                    <option value="match">Elegir la generación más parecida (sin convertir)</option>
+                  </select>
+                  <label className="flex items-center gap-1 text-muted">
+                    candidatos
+                    <select value={variants} onChange={(e) => setVariants(Number(e.target.value))} className={inputCls} title="Generaciones por creación; cada una se puntúa contra la voz (🎯 en la tarjeta)">
+                      {[2, 4, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </label>
+                </div>
                 <p className="text-[11px] text-muted">
-                  {status?.voice.online ? "La canción se genera y después se convierte a tu timbre (1–3 min extra)." : "El servicio de voz está apagado: ejecuta make voice."}
+                  {!status?.voice.online ? "El servicio de voz está apagado: ejecuta make voice." : voiceMode === "match" ? "Se generan varias y cada una recibe un parecido con la voz; te quedas con la mejor, sin vocoder por medio." : "La canción se genera y después se convierte a tu timbre (1–3 min extra)."}
                   {isRegister(selectedVoice?.register) && ` La música se escribe en registro de ${REGISTER_LABEL[selectedVoice.register].toLowerCase()} para que la voz no se fuerce en los agudos.`}
                 </p>
                 {selectedVoice && isRegister(selectedVoice.register) && (

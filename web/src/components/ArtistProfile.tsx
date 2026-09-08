@@ -70,6 +70,8 @@ export default function ArtistProfile({ artist, voices, onUpdated, onDeleted, on
         </button>
       </section>
 
+      <LoraSection artist={artist} onChanged={onVoicesChanged} />
+
       <section className="border-t border-border pt-4">
         <div className="mb-3 flex items-baseline justify-between">
           <h3 className="text-xs font-medium uppercase tracking-wide text-muted">Imagen de {artist.name}</h3>
@@ -131,5 +133,74 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       </div>
       {children}
     </label>
+  );
+}
+
+type LoraStatus = { status: string; path: string | null; progress: string; error: string | null; tag: string | null; songs: number; running: boolean; training: { current_epoch: number; current_step: number; current_loss: number | null; estimated_time_remaining: number } | null };
+
+/** Trains / shows the artist's ACE-Step LoRA (the model sings with the artist's voice; no conversion). */
+function LoraSection({ artist, onChanged }: { artist: ArtistDTO; onChanged: () => void }) {
+  const [info, setInfo] = useState<LoraStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const active = info?.status === "preparing" || info?.status === "training";
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/artists/${artist.id}/lora`, { cache: "no-store" });
+        if (res.ok && alive) setInfo((await res.json()) as LoraStatus);
+      } catch {
+        /* offline */
+      }
+    };
+    load();
+    const t = setInterval(load, active ? 10000 : 60000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [artist.id, active]);
+  const act = async (method: "POST" | "DELETE") => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/artists/${artist.id}/lora`, { method, headers: { "content-type": "application/json" }, body: method === "POST" ? JSON.stringify({ epochs: 10 }) : undefined });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Error");
+      setInfo(null);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="border-t border-border pt-4">
+      <div className="mb-2 flex items-baseline justify-between">
+        <h3 className="text-xs font-medium uppercase tracking-wide text-muted">Voz entrenada en el motor (LoRA)</h3>
+        <span className="text-[11px] text-muted">{info ? `${info.songs} canciones con letra` : ""}</span>
+      </div>
+      <p className="mb-2 text-xs text-muted">
+        ACE-Step aprende la voz de {artist.name} de sus propias canciones y las nuevas salen cantadas con ella desde el modelo, sin conversión ni vocoder. Necesita 3+ canciones terminadas y apaga el motor mientras entrena (10 épocas ≈ 1–3 h).
+      </p>
+      {info?.status === "done" && <p className="mb-2 text-xs text-accent">✅ {info.progress} · tag «{info.tag}». Actívalo en el panel de crear («Cantar con el LoRA»).</p>}
+      {active && <p className="mb-2 text-xs text-amber-300">⏳ {info?.progress}{info?.training?.estimated_time_remaining ? ` · quedan ~${Math.round(info.training.estimated_time_remaining / 60)} min` : ""}</p>}
+      {info?.status === "failed" && <p className="mb-2 text-xs text-red-300">Falló: {info.error}</p>}
+      {error && <p className="mb-2 text-xs text-red-300">{error}</p>}
+      <div className="flex gap-2">
+        {!active && (
+          <button onClick={() => act("POST")} disabled={busy || (info?.songs ?? 0) < 3} className="rounded-lg bg-accent-2 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40">
+            {info?.status === "done" ? "Volver a entrenar" : "Entrenar la voz (LoRA)"}
+          </button>
+        )}
+        {active && (
+          <button onClick={() => act("DELETE")} disabled={busy} className="rounded-lg bg-red-500/20 px-3 py-1.5 text-xs text-red-300 disabled:opacity-40">
+            Parar
+          </button>
+        )}
+      </div>
+    </section>
   );
 }

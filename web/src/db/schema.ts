@@ -36,6 +36,9 @@ export const songs = sqliteTable("songs", {
   autotune: integer("autotune", { mode: "boolean" }).notNull().default(false),
   /** Conversion quality knobs sent to the voice service (JSON, see lib/voice-options.ts); null = service defaults. */
   voiceOptions: text("voice_options"),
+  /** Voice to compare the generated singer with (CAMPPlus cosine similarity, scored once the song is done). */
+  voiceMatchId: text("voice_match_id"),
+  voiceSimilarity: real("voice_similarity"),
   /** Stills video (sequence of Pixar-style images + Ken Burns): none | queued | rendering | done | failed. */
   videoStatus: text("video_status").notNull().default("none"),
   videoJobId: text("video_job_id"),
@@ -97,6 +100,12 @@ export const artists = sqliteTable("artists", {
   /** Portrait generated with the OpenAI image API from `imagePrompt` (file under data/images/artists). */
   imageFile: text("image_file"),
   imagePrompt: text("image_prompt"),
+  /** ACE-Step LoRA trained on the artist's songs: none | preparing | training | done | failed (see lib/lora.ts). */
+  loraStatus: text("lora_status").notNull().default("none"),
+  loraPath: text("lora_path"),
+  loraProgress: text("lora_progress").notNull().default(""),
+  loraError: text("lora_error"),
+  loraTag: text("lora_tag"),
   createdAt: integer("created_at").notNull(),
 });
 

@@ -31,6 +31,11 @@ export function createArtist(input: { name: string; emoji?: string; style?: stri
     defaultVoiceId: null,
     imageFile: null,
     imagePrompt: null,
+    loraStatus: "none",
+    loraPath: null,
+    loraProgress: "",
+    loraError: null,
+    loraTag: null,
     createdAt: Date.now(),
   };
   db.insert(artists).values(row).run();

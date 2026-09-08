@@ -23,6 +23,8 @@ export const ConversionOptionsSchema = z
     enhanceVocals: z.boolean().optional(),
     /** dB of attenuation of the non-harmonic (noisy) part of the converted stem above 2.5 kHz (HPSS); 0 = off. */
     deharshDb: z.number().min(0).max(12).optional(),
+    /** Hybrid: converted vocal below this frequency, the original stem's highs above it (1000–12000; 0 = off). */
+    keepHighsHz: z.number().min(0).max(12000).optional(),
   })
   .strict();
 
@@ -50,5 +52,6 @@ export function conversionFormFields(o: ConversionOptions): [string, string][] {
   if (o.glueReverb !== undefined) out.push(["glue_reverb", String(o.glueReverb)]);
   if (o.enhanceVocals !== undefined) out.push(["enhance_vocals", String(o.enhanceVocals)]);
   if (o.deharshDb !== undefined) out.push(["deharsh_db", String(o.deharshDb)]);
+  if (o.keepHighsHz !== undefined) out.push(["keep_highs_hz", String(o.keepHighsHz)]);
   return out;
 }

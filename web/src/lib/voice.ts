@@ -144,6 +144,20 @@ export async function downloadJobAudio(jobId: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
+/**
+ * How much the singer of `songPath` sounds like the voice in `referencePath`: cosine similarity of CAMPPlus
+ * speaker embeddings (same singer ≈ 0.8+, another singer of the same register ≈ 0.4–0.6). ~20–40 s (Demucs).
+ */
+export async function voiceSimilarity(songPath: string, referencePath: string, isStem = false): Promise<number> {
+  const form = new FormData();
+  form.append("audio", new Blob([fs.readFileSync(songPath)]), path.basename(songPath));
+  form.append("reference", new Blob([fs.readFileSync(referencePath)]), path.basename(referencePath));
+  form.append("is_stem", String(isStem));
+  const res = await fetch(`${BASE}/voice-similarity`, { method: "POST", body: form, signal: AbortSignal.timeout(10 * 60_000) });
+  if (!res.ok) throw new Error(`Parecido de voz falló (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  return ((await res.json()) as { similarity: number }).similarity;
+}
+
 /** Runs the AI restoration model (Apollo) on a full mix; returns the enhanced audio (WAV 44.1k). */
 export async function enhanceAudio(songPath: string): Promise<Buffer> {
   const form = new FormData();
