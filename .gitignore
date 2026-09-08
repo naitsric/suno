@@ -23,3 +23,7 @@ engine/video/stills/.cache/
 engine/video/stills/cache/
 engine/video/poc/out/
 engine/video/poc/cache/
+# estado del nodo cloud de video (ids de instancia/volumen, cambian por máquina)
+engine/video/.instance_*
+engine/video/.sg_id
+engine/video/.volume_id
