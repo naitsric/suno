@@ -337,8 +337,9 @@ function ReferenceBox({ artist, voiceOnline, applied, onUse, onClear, onError }:
     ? [
         ...a.tags.genres.slice(0, 2).map((s) => `${s.label} ${Math.round(s.score * 100)}%`),
         ...a.tags.moods.slice(0, 2).map((s) => s.label),
-        ...a.tags.instruments.slice(0, 4).map((s) => s.label),
-        a.vocals.present ? `${a.vocals.pitch ? `${a.vocals.pitch.gender_guess === "male" ? "voz masculina" : a.vocals.pitch.gender_guess === "female" ? "voz femenina" : "voz"} · ${a.vocals.pitch.register} ${a.vocals.pitch.low_note}–${a.vocals.pitch.high_note}` : "con voz"}${a.vocals.language ? ` · ${a.vocals.language}` : ""}` : "instrumental",
+        ...a.tags.instruments.filter((s) => s.group === "melodic").slice(0, 3).map((s) => s.label),
+        ...a.tags.instruments.filter((s) => s.group !== "melodic").filter((s, i, l) => l.findIndex((x) => x.group === s.group) === i).map((s) => s.label),
+        a.vocals.present ? `${a.vocals.gender === "male" ? "voz masculina" : a.vocals.gender === "female" ? "voz femenina" : "voz"}${a.vocals.pitch ? ` · ${a.vocals.pitch.register} ${a.vocals.pitch.low_note}–${a.vocals.pitch.high_note}` : ""}${a.vocals.language ? ` · ${a.vocals.language}` : ""}` : "instrumental",
         `${a.bpm} bpm`,
         a.key,
       ]
@@ -393,10 +394,10 @@ function ReferenceBox({ artist, voiceOnline, applied, onUse, onClear, onError }:
                   <dt>Sonoridad</dt><dd>{a.loudness_dbfs} dBFS · rango {a.dynamic_range_db} dB</dd>
                   <dt>Brillo</dt><dd>{a.brightness_hz} Hz · {a.onsets_per_sec} ataques/s</dd>
                   <dt>Stems</dt><dd>batería {Math.round(a.stems.drums * 100)}% · bajo {Math.round(a.stems.bass * 100)}% · resto {Math.round(a.stems.other * 100)}% · voz {Math.round(a.stems.vocals * 100)}%</dd>
-                  <dt>Voz</dt><dd>{a.vocals.present ? `${Math.round(a.vocals.activity * 100)}% del tiempo${a.vocals.pitch ? ` · mediana ${a.vocals.pitch.median_note}` : ""}${a.vocals.language ? ` · ${a.vocals.language} ${Math.round((a.vocals.language_probability ?? 0) * 100)}%` : ""}` : "no"}</dd>
+                  <dt>Voz</dt><dd>{a.vocals.present ? `${Math.round(a.vocals.activity * 100)}% del tiempo · ${a.vocals.gender ?? "?"} ${Math.round((a.vocals.gender_confidence ?? 0) * 100)}%${a.vocals.pitch ? ` · mediana ${a.vocals.pitch.median_note}` : ""}${a.vocals.language ? ` · ${a.vocals.language} ${Math.round((a.vocals.language_probability ?? 0) * 100)}%` : ""}` : "no"}</dd>
                   <dt>Estilo vocal</dt><dd>{a.tags.vocals.slice(0, 3).map((s) => `${s.label} ${Math.round(s.score * 100)}%`).join(", ") || "—"}</dd>
                   <dt>Producción</dt><dd>{a.tags.production.slice(0, 3).map((s) => `${s.label} ${Math.round(s.score * 100)}%`).join(", ")}</dd>
-                  <dt>Instrumentos</dt><dd className="col-span-2">{a.tags.instruments.map((s) => `${s.label} ${Math.round(s.score * 100)}%`).join(", ")}</dd>
+                  <dt>Instrumentos</dt><dd className="col-span-2">{(["melodic", "percussion", "bass"] as const).map((g) => `${g === "melodic" ? "melódicos" : g === "percussion" ? "percusión" : "bajo"}: ${a.tags.instruments.filter((s) => s.group === g).map((s) => `${s.label} ${Math.round(s.score * 100)}%`).join(", ")}`).join(" · ")}</dd>
                   <dt>Secciones</dt><dd className="col-span-2">{a.structure.map((s) => `${s.role} ${Math.floor(s.start / 60)}:${Math.floor(s.start % 60).toString().padStart(2, "0")} (${s.energy})`).join(" · ")}</dd>
                   {a.vocals.transcript_snippet && (<><dt>Letra oída</dt><dd className="col-span-2 italic">“{a.vocals.transcript_snippet.slice(0, 160)}…”</dd></>)}
                   <dt>Tiempos</dt><dd className="col-span-2">{Object.entries(a.timings).map(([k, v]) => `${k} ${v}s`).join(" · ")}</dd>

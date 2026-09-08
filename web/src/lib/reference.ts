@@ -10,7 +10,8 @@ import * as service from "./voice";
 
 const CACHE_MS = 30 * 24 * 3600_000; // the video does not change; re-analysing costs 2 min of GPU
 
-export type Scored = { label: string; score: number };
+export type Scored = { label: string; score: number; /** Fraction of the windows where the label ranked top 3. */ hits?: number };
+export type ScoredInstrument = Scored & { group: "melodic" | "percussion" | "bass" };
 export type ReferenceSection = { start: number; end: number; energy: "low" | "mid" | "high"; role: "intro" | "outro" | "peak" | "section"; level_db: number };
 export type ReferenceAnalysis = {
   source: { id: string | null; url: string | null; title: string | null; channel?: string | null; duration: number | null; tags?: string[]; description?: string; artist?: string | null; track?: string | null; upload_date?: string | null };
@@ -34,11 +35,14 @@ export type ReferenceAnalysis = {
     activity: number;
     best_window: [number, number];
     pitch?: { median_hz: number; p10_hz: number; p90_hz: number; median_note: string; low_note: string; high_note: string; register: string; gender_guess: "male" | "female" | "ambiguous" } | null;
+    /** CLAP man/woman contrast on the vocal stem, tie-broken by pitch. */
+    gender?: "male" | "female" | "ambiguous";
+    gender_confidence?: number;
     language?: string;
     language_probability?: number;
     transcript_snippet?: string;
   };
-  tags: { genres: Scored[]; moods: Scored[]; instruments: Scored[]; vocals: Scored[]; production: Scored[] };
+  tags: { genres: Scored[]; moods: Scored[]; instruments: ScoredInstrument[]; vocals: Scored[]; production: Scored[] };
   timings: Record<string, number>;
 };
 
@@ -81,21 +85,23 @@ export async function analyzeYoutubeReference(url: string, opts: { voiceBrief?: 
 
 /** Deterministic tags from the measurements: the fallback and the skeleton the LLM pass starts from. */
 export function buildReferenceTags(a: ReferenceAnalysis, opts: { voiceBrief?: string | null } = {}): { tags: string[]; vocalTags: string[] } {
-  const pick = (list: Scored[], n: number, minShare: number) => {
+  // Keep a label when it scores close to the leader AND shows up in enough windows: a zero-shot
+  // vocabulary always has a nearest label, so weak runner-ups are usually the model guessing.
+  const pick = (list: Scored[], n: number, minShare: number, minHits = 0) => {
     const top = list[0]?.score ?? 0;
-    return list.filter((s, i) => i < n && s.score >= top * minShare).map((s) => s.label);
+    return list.filter((s, i) => i < n && s.score >= top * minShare && (s.hits ?? 1) >= minHits).map((s) => s.label);
   };
   const tags: string[] = [];
   tags.push(...pick(a.tags.genres, 2, 0.45));
   tags.push(...pick(a.tags.moods, 2, 0.5));
-  tags.push(...pick(a.tags.instruments, 5, 0.3));
+  const byGroup = (g: ScoredInstrument["group"]) => a.tags.instruments.filter((s) => s.group === g);
+  tags.push(...pick(byGroup("melodic"), 3, 0.4, 0.5), ...pick(byGroup("percussion"), 1, 0), ...pick(byGroup("bass"), 1, 0));
   const vocalTags: string[] = [];
   if (!a.vocals.present) vocalTags.push("instrumental");
   else if (!opts.voiceBrief) {
-    const g = a.vocals.pitch?.gender_guess;
+    const g = a.vocals.gender ?? a.vocals.pitch?.gender_guess;
     const clap = a.tags.vocals.filter((s) => !/^(male|female) vocals$|duet/.test(s.label)).slice(0, 2).map((s) => s.label);
-    const clapGender = a.tags.vocals.find((s) => /^(male|female) vocals$/.test(s.label))?.label;
-    vocalTags.push(g === "male" ? "male vocals" : g === "female" ? "female vocals" : (clapGender ?? "vocals"));
+    vocalTags.push(g === "male" ? "male vocals" : g === "female" ? "female vocals" : "vocals");
     if (a.vocals.pitch) vocalTags.push(`${a.vocals.pitch.register} vocal register`);
     vocalTags.push(...clap);
   }
@@ -138,7 +144,8 @@ const SYSTEM = `Eres un productor musical. Recibes el ANÁLISIS MEDIDO de una ca
 Responde SOLO con JSON válido con esta forma exacta:
 {"style": string, "caption": string, "summary": string, "structure": string}
 Reglas:
-- "style": 12–20 tags en inglés separados por coma, del más al menos importante: género y subgénero (1–2), mood (1–2), 3–6 instrumentos, tipo y timbre de voz, "<N> bpm", tonalidad, producción/época, energía. Usa lo que dicen las MEDIDAS: instrumentos solo si están en la lista medida o el género los implica sin duda; el tempo y la tonalidad medidos tal cual (sin redondear a otro número).
+- "style": 12–20 tags en inglés separados por coma, del más al menos importante: género y subgénero (1–2), mood (1–2), 3–5 instrumentos, tipo y timbre de voz, "<N> bpm", tonalidad, producción/época, energía. Usa lo que dicen las MEDIDAS; el tempo y la tonalidad medidos tal cual (sin redondear a otro número).
+- Instrumentos: las etiquetas medidas son "la más parecida" de un vocabulario cerrado, con puntuación y presencia (% de ventanas). Elige 3–5 entre las de mayor puntuación Y presencia, no copies la lista entera, y traduce una etiqueta improbable al instrumento que ese género usa de verdad (p. ej. mandolin/banjo/ukulele en un reggaetón = acoustic guitar; saxophone en un trap = synth lead). Añade el instrumento típico del género solo si es indiscutible (808 bass y dembow beat en reggaetón).
 - "caption": un párrafo en inglés de 40–70 palabras que describa cómo suena (como se lo dirías a músicos de sesión): género, instrumentación, groove, voz, producción, atmósfera, energía y cómo evoluciona.
 - "summary": 2–3 frases en español para el usuario: qué es la referencia (género, instrumentos, voz, tempo) y qué se ha tomado de ella.
 - "structure": 1–2 frases en español sobre cómo está construida en el tiempo (intro, cuándo llega el primer pico, bajadas, final) para que la letra pueda imitarla.
@@ -147,7 +154,7 @@ Reglas:
 - Si la referencia no tiene voz, incluye "instrumental".`;
 
 export async function writeReferencePrompt(a: ReferenceAnalysis, opts: { voiceBrief?: string | null; artistStyle?: string | null } = {}): Promise<ReferencePrompt> {
-  const { tags } = buildReferenceTags(a, opts);
+  const { tags, vocalTags } = buildReferenceTags(a, opts);
   const keyScale = a.key !== "unknown" && a.key_confidence >= 0.3 ? a.key : null;
   const rules: ReferencePrompt = {
     style: tags.join(", "),
@@ -168,11 +175,12 @@ export async function writeReferencePrompt(a: ReferenceAnalysis, opts: { voiceBr
     `Espectro: sub ${pct(a.spectrum.sub_bass)}, graves ${pct(a.spectrum.bass)}, medios ${pct(a.spectrum.mids)}, agudos ${pct(a.spectrum.highs)}, aire ${pct(a.spectrum.air)}`,
     `Peso de cada stem: batería ${pct(a.stems.drums)}, bajo ${pct(a.stems.bass)}, resto (armonía/melodía) ${pct(a.stems.other)}, voz ${pct(a.stems.vocals)}`,
     v.present
-      ? `Voz: presente el ${Math.round(v.activity * 100)}% del tiempo${v.pitch ? `; mediana ${v.pitch.median_note} (${v.pitch.median_hz} Hz), rango ${v.pitch.low_note}–${v.pitch.high_note}, registro ${v.pitch.register}, género probable ${v.pitch.gender_guess}` : ""}${v.language ? `; idioma ${v.language} (${Math.round((v.language_probability ?? 0) * 100)}%)` : ""}${v.transcript_snippet ? `; fragmento de letra: "${v.transcript_snippet.slice(0, 200)}"` : ""}`
+      ? `Voz: presente el ${Math.round(v.activity * 100)}% del tiempo; género ${v.gender ?? "desconocido"} (confianza ${Math.round((v.gender_confidence ?? 0) * 100)}%)${v.pitch ? `; mediana ${v.pitch.median_note} (${v.pitch.median_hz} Hz), rango ${v.pitch.low_note}–${v.pitch.high_note}, registro ${v.pitch.register}` : ""}${v.language ? `; idioma ${v.language} (${Math.round((v.language_probability ?? 0) * 100)}%)` : ""}${v.transcript_snippet ? `; fragmento de letra: "${v.transcript_snippet.slice(0, 200)}"` : ""}`
       : "Voz: no hay (instrumental)",
     `Géneros (CLAP): ${fmt(a.tags.genres)}`,
     `Moods: ${fmt(a.tags.moods)}`,
-    `Instrumentos (medidos sobre la mezcla sin voz): ${fmt(a.tags.instruments)}`,
+    `Instrumentos melódicos/armónicos (stem sin batería, bajo ni voz): ${fmt(a.tags.instruments.filter((s) => s.group === "melodic"))}`,
+    `Percusión (stem de batería): ${fmt(a.tags.instruments.filter((s) => s.group === "percussion"))} · Bajo (stem de bajo): ${fmt(a.tags.instruments.filter((s) => s.group === "bass"))}`,
     v.present ? `Estilo vocal: ${fmt(a.tags.vocals)}` : "",
     `Producción: ${fmt(a.tags.production)}`,
     `Estructura: ${describeStructure(a)} Secciones: ${a.structure.map((s) => `${s.role} ${Math.round(s.start)}–${Math.round(s.end)} s (${s.energy})`).join("; ")}`,
@@ -187,7 +195,7 @@ export async function writeReferencePrompt(a: ReferenceAnalysis, opts: { voiceBr
     const style = (p.style ?? "").toString().trim();
     if (!style) return rules;
     return {
-      style: ensureMeta(style, a.bpm, keyScale),
+      style: ensureMeta(style, a.bpm, keyScale, a.vocals.present && !opts.voiceBrief ? vocalTags : []),
       caption: (p.caption ?? "").toString().trim(),
       summary: (p.summary ?? "").toString().trim() || rules.summary,
       structure: (p.structure ?? "").toString().trim() || rules.structure,
@@ -201,12 +209,16 @@ export async function writeReferencePrompt(a: ReferenceAnalysis, opts: { voiceBr
   }
 }
 
-/** The measured tempo/key must survive the LLM (it likes to "fix" them). */
-function ensureMeta(style: string, bpm: number, keyScale: string | null): string {
-  let s = style.replace(/\b\d{2,3}\s*bpm\b/gi, `${bpm} bpm`);
-  if (!/\bbpm\b/i.test(s)) s += `, ${bpm} bpm`;
-  if (keyScale && !new RegExp(`\\b${keyScale.replace("#", "\\#")}\\b`, "i").test(s)) s += `, ${keyScale}`;
-  return s;
+/**
+ * The measured tempo/key must survive the LLM (it likes to "fix" them), the vocal tags must be there
+ * (it drops them one run out of three) and the list is normalised (spacing, duplicates).
+ */
+function ensureMeta(style: string, bpm: number, keyScale: string | null, vocalTags: string[]): string {
+  const tags = dedupe(style.replace(/\b\d{2,3}\s*bpm\b/gi, `${bpm} bpm`).split(/\s*,\s*/).map((t) => t.trim()).filter(Boolean));
+  if (!tags.some((t) => /\bbpm\b/i.test(t))) tags.push(`${bpm} bpm`);
+  if (keyScale && !tags.some((t) => t.toLowerCase() === keyScale.toLowerCase())) tags.push(keyScale);
+  if (vocalTags.length && !tags.some((t) => /\b(vocals?|voice|singer|rap|rapping|singing)\b/i.test(t))) tags.push(...vocalTags.slice(0, 2));
+  return tags.join(", ");
 }
 
 function pct(x: number) {
@@ -215,9 +227,10 @@ function pct(x: number) {
 
 function summarize(a: ReferenceAnalysis, opts: { voiceBrief?: string | null }): string {
   const g = a.tags.genres.slice(0, 2).map((s) => s.label).join(" / ");
-  const inst = a.tags.instruments.slice(0, 4).map((s) => s.label).join(", ");
+  const inst = [...a.tags.instruments.filter((s) => s.group === "melodic").slice(0, 3), ...a.tags.instruments.filter((s) => s.group !== "melodic").filter((s, i, l) => l.findIndex((x) => x.group === s.group) === i)].map((s) => s.label).join(", ");
   const v = a.vocals;
-  const voice = !v.present ? "instrumental" : v.pitch ? `voz ${v.pitch.gender_guess === "male" ? "masculina" : v.pitch.gender_guess === "female" ? "femenina" : "de género ambiguo"} (${v.pitch.register}, ${v.pitch.low_note}–${v.pitch.high_note})${v.language ? ` en ${v.language}` : ""}` : "con voz";
+  const gender = v.gender ?? v.pitch?.gender_guess;
+  const voice = !v.present ? "instrumental" : `voz ${gender === "male" ? "masculina" : gender === "female" ? "femenina" : "de género ambiguo"}${v.pitch ? ` (${v.pitch.register}, ${v.pitch.low_note}–${v.pitch.high_note})` : ""}${v.language ? ` en ${v.language}` : ""}`;
   const taken = opts.voiceBrief ? "Se toman género, instrumentación, tempo y tonalidad; la voz será la del artista." : "Se toman género, instrumentación, voz, tempo y tonalidad.";
   return `Suena a ${g} con ${inst}; ${voice}; ${a.bpm} bpm en ${a.key}. ${taken}`;
 }
