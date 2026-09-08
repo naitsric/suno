@@ -70,6 +70,11 @@ export const voices = sqliteTable("voices", {
   /** Studio-cleaned copy of the recording (denoise, EQ, compression); `useClean` picks which one is used. */
   cleanFile: text("clean_file"),
   useClean: integer("use_clean", { mode: "boolean" }).notNull().default(false),
+  /** Sculpted copy of the active reference (formants, pitch, air via Praat) so the voice is one of a kind;
+   *  `useSculpt` picks it, `sculptParams` is the JSON {formant, pitch, brightness} it was made with. */
+  sculptFile: text("sculpt_file"),
+  sculptParams: text("sculpt_params"),
+  useSculpt: integer("use_sculpt", { mode: "boolean" }).notNull().default(false),
   /** "speech" = the person talking; "singing" = a sung reference (e.g. extracted from a generated song). */
   kind: text("kind").notNull().default("speech"),
   /** Song this synthetic singer was extracted from, when kind = singing. */

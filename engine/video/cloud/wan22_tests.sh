@@ -22,6 +22,10 @@ fi
 # ---- test 2: Wan2.2 S2V-14B, reference portrait + chorus vocals (+ our pose video) ----
 if [ ! -f tests/s2v_chorus.mp4 ]; then
   log "test 2: S2V-14B"
+  # deps the base requirements do not list: einops is imported by the S2V code, the rest come from requirements_s2v.txt
+  uv pip install -q --python .venv-wan22/bin/python einops $(grep -vE '^#|^\s*$|decord' Wan2.2/requirements_s2v.txt | tr '\n' ' ') >> tests/s2v_deps.log 2>&1
+  uv pip install -q --python .venv-wan22/bin/python decord >> tests/s2v_deps.log 2>&1 || uv pip install -q --python .venv-wan22/bin/python eva-decord >> tests/s2v_deps.log 2>&1
+  log "s2v deps installed: $(.venv-wan22/bin/python -c 'import einops, librosa; print(\"ok\")' 2>&1 | tail -1)"
   PROMPT="Pixar style 3D animated music video, stylized CGI render of a young woman rock singer with big expressive eyes, tousled dark hair with red streaks, black leather jacket, singing passionately into a microphone on a concert stage, warm rim light and soft volumetric stage lights, Disney Pixar animation movie, high quality"
   for SIZE in "832*480" "1024*704"; do
     log "s2v size $SIZE"

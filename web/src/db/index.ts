@@ -109,6 +109,9 @@ function ensureSchema(sqlite: Database.Database) {
     ["profile", "profile TEXT"],
     ["clean_file", "clean_file TEXT"],
     ["use_clean", "use_clean INTEGER NOT NULL DEFAULT 0"],
+    ["sculpt_file", "sculpt_file TEXT"],
+    ["sculpt_params", "sculpt_params TEXT"],
+    ["use_sculpt", "use_sculpt INTEGER NOT NULL DEFAULT 0"],
     ["kind", "kind TEXT NOT NULL DEFAULT 'speech'"],
     ["source_song_id", "source_song_id TEXT"],
   ] as const) {

@@ -19,9 +19,18 @@ export function getVoice(id: string): Voice | undefined {
   return db.select().from(voices).where(eq(voices.id, id)).get();
 }
 
-/** The file used as reference: the cleaned copy when the user enabled it, else the original recording. */
+/** The file used as reference: the sculpted copy when enabled, else the cleaned copy when enabled, else the original. */
 export function voicePath(v: Voice) {
+  return v.useSculpt && v.sculptFile ? path.join(VOICES_DIR, v.sculptFile) : voiceSourcePath(v);
+}
+
+/** The reference before sculpting (cleaned copy or original): what «Esculpir voz» starts from. */
+export function voiceSourcePath(v: Voice) {
   return path.join(VOICES_DIR, v.useClean && v.cleanFile ? v.cleanFile : v.file);
+}
+
+export function voiceSculptPath(v: Voice) {
+  return v.sculptFile ? path.join(VOICES_DIR, v.sculptFile) : null;
 }
 
 export function voiceOriginalPath(v: Voice) {
@@ -48,6 +57,30 @@ export async function setUseClean(id: string, useClean: boolean): Promise<Voice>
   if (!v) throw new Error("La voz no existe");
   if (useClean && !v.cleanFile) throw new Error("Esta voz no tiene versión retocada");
   db.update(voices).set({ useClean, profile: null }).where(eq(voices.id, id)).run();
+  return analyzeVoice(getVoice(id)!);
+}
+
+/**
+ * Sculpts the timbre of the active reference (formants, pitch, air) via the voice service so the voice
+ * becomes one of a kind. Keeps the source; stores `<id>.sculpt.wav`, switches the voice to it and
+ * re-measures the profile. Reversible with setUseSculpt(id, false).
+ */
+export async function sculptVoice(id: string, params: service.SculptParams): Promise<{ voice: Voice; info: service.SculptInfo }> {
+  const v = getVoice(id);
+  if (!v) throw new Error("La voz no existe");
+  const { wav, info } = await service.sculptReference(voiceSourcePath(v), params);
+  const sculptFile = `${id}.sculpt.wav`;
+  fs.writeFileSync(path.join(VOICES_DIR, sculptFile), wav);
+  db.update(voices).set({ sculptFile, sculptParams: JSON.stringify(params), useSculpt: true, profile: null }).where(eq(voices.id, id)).run();
+  return { voice: await analyzeVoice(getVoice(id)!), info };
+}
+
+/** Switches between the sculpted and the unsculpted reference; the pitch profile is re-measured on the active one. */
+export async function setUseSculpt(id: string, useSculpt: boolean): Promise<Voice> {
+  const v = getVoice(id);
+  if (!v) throw new Error("La voz no existe");
+  if (useSculpt && !v.sculptFile) throw new Error("Esta voz no tiene versión esculpida");
+  db.update(voices).set({ useSculpt, profile: null }).where(eq(voices.id, id)).run();
   return analyzeVoice(getVoice(id)!);
 }
 
@@ -118,6 +151,9 @@ export async function createVoiceFromSong(songId: string, name?: string): Promis
     profile: null,
     cleanFile: null,
     useClean: false,
+    sculptFile: null,
+    sculptParams: null,
+    useSculpt: false,
     kind: "singing",
     sourceSongId: song.id,
     createdAt: Date.now(),
@@ -168,7 +204,7 @@ export async function saveVoice(name: string, input: Buffer, originalName: strin
     fs.rmSync(path.join(VOICES_DIR, wav), { force: true });
     throw new Error("La grabación es demasiado corta: graba al menos 10 segundos.");
   }
-  const row: Voice = { id, artistId, name: name.trim() || "Mi voz", file: wav, durationSec, f0MedianHz: null, singLowHz: null, singHighHz: null, register: null, profile: null, cleanFile: null, useClean: false, kind: "speech", sourceSongId: null, createdAt: Date.now() };
+  const row: Voice = { id, artistId, name: name.trim() || "Mi voz", file: wav, durationSec, f0MedianHz: null, singLowHz: null, singHighHz: null, register: null, profile: null, cleanFile: null, useClean: false, sculptFile: null, sculptParams: null, useSculpt: false, kind: "speech", sourceSongId: null, createdAt: Date.now() };
   db.insert(voices).values(row).run();
   if (artistId) {
     // First voice of an artist becomes its default.
@@ -182,6 +218,7 @@ export function deleteVoice(id: string) {
   if (!v) return false;
   fs.rmSync(voiceOriginalPath(v), { force: true });
   if (v.cleanFile) fs.rmSync(path.join(VOICES_DIR, v.cleanFile), { force: true });
+  if (v.sculptFile) fs.rmSync(path.join(VOICES_DIR, v.sculptFile), { force: true });
   db.delete(voices).where(eq(voices.id, id)).run();
   db.update(artists).set({ defaultVoiceId: null }).where(eq(artists.defaultVoiceId, id)).run();
   return true;

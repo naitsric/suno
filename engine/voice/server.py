@@ -16,6 +16,8 @@ REST API (port 8002):
                            as a *sung* reference voice (a synthetic singer that stays the same across songs)
   POST /clean-reference    multipart: audio → WAV: reference denoised (Demucs vocal stem) + de-reverb (UVR DeEcho-DeReverb)
                            + speech chain (HPF, de-ess, EQ, comp, loudnorm)
+  POST /sculpt-reference   multipart: audio, [formant_pct], [pitch_st], [brightness_db] → WAV: the reference with its
+                           formants (vocal-tract size), pitch median and air reshaped (Praat PSOLA, CPU); see sculpt.py
   POST /align-lyrics       multipart: audio (song), lyrics (text), [language], [model] → line/word timings of the lyrics
                            (Demucs vocal stem → faster-whisper word timestamps → aligned to the known lyrics)
   POST /enhance            multipart: audio → WAV restored with Apollo (band-split music restoration)
@@ -1012,6 +1014,44 @@ def clean_reference(audio: UploadFile = File(...)):
     from fastapi.responses import Response
 
     return Response(content=data, media_type="audio/wav", headers={"X-Clean-Info": json.dumps(info)})
+
+
+@app.post("/sculpt-reference")
+def sculpt_reference(
+    audio: UploadFile = File(...),
+    formant_pct: float = Form(0.0),
+    pitch_st: float = Form(0.0),
+    brightness_db: float = Form(0.0),
+):
+    """Reshapes the timbre of a reference (formants, pitch median, air) → WAV mono 44.1 kHz; measurements in the
+    X-Sculpt-Info header (JSON). CPU only (Praat PSOLA): no GPU lock, runs in FastAPI's threadpool."""
+    import json
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from sculpt import sculpt_file
+
+    job_dir = WORK_DIR / f"sculpt-{uuid.uuid4()}"
+    job_dir.mkdir(parents=True)
+    src = job_dir / f"upload{Path(audio.filename or 'in.wav').suffix or '.wav'}"
+    with src.open("wb") as f:
+        shutil.copyfileobj(audio.file, f)
+    out = job_dir / "sculpt.wav"
+    try:
+        info = sculpt_file(src, out, formant_pct, pitch_st, brightness_db)
+        data = out.read_bytes()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+    from fastapi.responses import Response
+
+    return Response(content=data, media_type="audio/wav", headers={"X-Sculpt-Info": json.dumps(info)})
 
 
 @app.post("/enhance")

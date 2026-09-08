@@ -151,6 +151,17 @@ análisis tarda 3–5 min con el modelo de 12B y se cachea por fotografía + per
    ruidosa o apagada). Se guarda como `<id>.clean.wav`, el original se conserva y una casilla decide
    cuál se usa; el perfil de tono se vuelve a medir sobre la activa.
 
+   **Esculpir voz** (opcional, por voz, también para voces cantadas): «🎨 Esculpir voz» en la
+   tarjeta → `POST /api/voices/[id]/sculpt {formant, pitch, brightness}` → `POST :8002/sculpt-reference`
+   (`engine/voice/sculpt.py`, Praat «Change gender» vía parselmouth, CPU, ~10 s). `formant` mueve los
+   formantes en % (tamaño de la garganta: −20 = más grande y oscura, +20 = más pequeña y brillante)
+   sin tocar la nota; `pitch` mueve la mediana de tono en semitonos; `brightness` es un shelf a 3 kHz
+   en dB (aire). Parte de la referencia activa (retocada u original), se guarda como
+   `<id>.sculpt.wav`, una casilla decide si se usa y el perfil de tono se vuelve a medir. Sirve para
+   que la voz sintética de un artista sea una que no existe en ningún sitio; las canciones ya hechas
+   no cambian hasta «Reconvertir voz». La respuesta trae F0 mediano y centroide antes/después para
+   comprobar que el cambio es real y no una impresión.
+
    **Afinar la voz (autotune)** (opcional, por canción, al crear o después con «Reconvertir voz»):
    Seed-VC sigue la curva de F0 que se le da, así que antes de condicionar se lleva cada frame a la
    nota más cercana de la escala de la canción (`key_scale` de ACE-Step; cromática si no hay), con
@@ -271,6 +282,27 @@ lo dice en la etapa. En la práctica: con motor + voz + Ollama residentes se arr
 <modelo>` y apagar motor o voz mientras renderiza. Un solo trabajo pesado a la vez (`_gpu_lock`),
 la pipeline se libera al terminar, y las imágenes ya renderizadas se reutilizan si el trabajo se
 relanza en el mismo directorio.
+
+## Video animado estilo Pixar (PoC, `engine/video/poc` y `engine/video/cloud`)
+
+Prueba de concepto de video musical **animado** con personajes consistentes: Wan 2.1 VACE
+(imagen de referencia = identidad del artista, video de control OpenPose = movimiento al
+beat), estilo Pixar por prompt. Scripts en `engine/video/poc/` (mismo venv que el video de
+imágenes): `ref_image.py` genera retratos, `pose_control.py` el control al ritmo de la
+canción, `generate.py` un clip de 5 s con checkpoint por paso y reanudación, y
+`full_video.py` la canción entera en clips cortados por compás con planos y luces según la
+energía. Conclusiones medidas (detalle en la skill `suno-video-studio`):
+
+- En el Mac (M5 Pro 24 GB) un clip de 5 s cuesta ~45 min y exige apagar motor, voz y
+  Ollama; el decode del VAE va en CPU con tiles de 128 px porque en MPS no cabe.
+- En una GPU NVIDIA (`engine/video/cloud/remote.py`: nodo EC2 g6e.2xlarge on-demand que
+  se enciende, renderiza y se apaga) el mismo clip tarda 4 min con VACE 1.3B y ~15 min con
+  VACE 14B; un video completo de 3:39 con 1.3B salió en 2,5 h (~6 USD).
+- VACE 1.3B pierde la cara del retrato en planos medios; **VACE 14B la conserva**. Wan 2.2
+  S2V (lip-sync desde el stem vocal) quedó pendiente de probar.
+
+El nodo cloud fue eliminado al cerrar el PoC; para reutilizar `cloud/` hay que crear una
+instancia nueva y correr `remote.py setup`.
 
 ## Cambiar de modelo
 

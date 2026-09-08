@@ -87,6 +87,27 @@ export async function cleanReference(referencePath: string): Promise<{ wav: Buff
   return { wav: Buffer.from(await res.arrayBuffer()), info };
 }
 
+export type SculptParams = { formant: number; pitch: number; brightness: number };
+export type SculptInfo = { f0_median_before_hz: number; f0_median_after_hz: number; centroid_before_hz: number; centroid_after_hz: number } | null;
+
+/** Reshapes a reference's timbre (formants %, pitch semitones, air dB) with Praat. Returns WAV mono 44.1 kHz and measurements. */
+export async function sculptReference(referencePath: string, p: SculptParams): Promise<{ wav: Buffer; info: SculptInfo }> {
+  const form = new FormData();
+  form.append("audio", new Blob([fs.readFileSync(referencePath)]), path.basename(referencePath));
+  form.append("formant_pct", String(p.formant));
+  form.append("pitch_st", String(p.pitch));
+  form.append("brightness_db", String(p.brightness));
+  const res = await fetch(`${BASE}/sculpt-reference`, { method: "POST", body: form, signal: AbortSignal.timeout(5 * 60_000) });
+  if (!res.ok) throw new Error(`Esculpir la voz falló (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  let info: SculptInfo = null;
+  try {
+    info = JSON.parse(res.headers.get("x-sculpt-info") ?? "null");
+  } catch {
+    /* optional */
+  }
+  return { wav: Buffer.from(await res.arrayBuffer()), info };
+}
+
 export async function submitConversion(songPath: string, referencePath: string, opts: { pitchShift?: number; diffusionSteps?: number; autoOctave?: boolean; autotune?: boolean; autotuneStrength?: number; keyScale?: string | null; refKind?: VoiceKind } = {}) {
   const form = new FormData();
   form.append("song", new Blob([fs.readFileSync(songPath)]), path.basename(songPath));
