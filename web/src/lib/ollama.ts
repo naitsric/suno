@@ -23,7 +23,13 @@ Reglas:
 - "style": lista corta de tags en inglés separados por comas (género, mood, instrumentos, voz, tempo). Ej: "indie pop, dreamy, female vocals, synths, 110 bpm".
 - "lyrics": letra completa usando etiquetas de estructura en líneas propias: [Intro], [Verse 1], [Pre-Chorus], [Chorus], [Verse 2], [Bridge], [Outro]. Sin acordes ni comentarios.
 - Si se pide instrumental, "lyrics" debe ser exactamente "[Instrumental]".
-- La letra va en el idioma pedido. Coros pegajosos, versos concretos, sin clichés vacíos.`;
+- La letra va en el idioma pedido. Coros pegajosos, versos concretos, sin clichés vacíos.
+- Letra cantable, no narrada: la descripción es el argumento, la canción escoge un momento y una emoción y los repite. No cuentes la historia en orden ni uses fechas, días de la semana, "y luego" ni diálogos entre comillas.
+- Líneas cortas: 6–10 sílabas en los versos y 8 o menos en el estribillo, máximo 8 palabras por línea. Presente y segunda persona.
+- Rima siempre (pareada AABB o alternada ABAB), sobre todo en el estribillo. Ninguna línea del estribillo sin rima.
+- El estribillo tiene 4 líneas como máximo, incluye el título y lo repite; si el género es urbano o pop, añade un gancho vocal cantable (eh-oh, oh-oh-oh, yeh) en un [Post-Chorus] de 2–4 líneas.
+- Máximo 8 líneas por verso y una imagen concreta por línea. Nada de acotaciones ni descripciones de producción entre paréntesis: todo lo que escribas se canta.
+- Si la descripción incluye cómo escribe el artista (jerga, muletillas, referencias), síguela por encima de estas reglas.`;
 
 /** Chat completion that must return a JSON object; tolerant parsing plus one retry at lower temperature. */
 export async function chatJson<T>(system: string, user: string, opts: { temperature?: number; timeoutMs?: number; numCtx?: number } = {}): Promise<Partial<T> & Record<string, unknown>> {
