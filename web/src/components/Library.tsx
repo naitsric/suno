@@ -169,8 +169,7 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
   const [autotune, setAutotune] = useState(song.autotune);
   const [reconverting, setReconverting] = useState(false);
   const [voiceId, setVoiceId] = useState(song.voiceId ?? "");
-  // Conversion mode: hybrid (Seed-VC below 3 kHz, the model singer's own highs above) is what the user kept;
-  // the full Seed-VC re-synthesis sounded metallic to them. Stored per song in voiceOptions.
+  // Keep the saved conversion mode for explicit retries. New songs default to matching, not conversion.
   const [hybrid, setHybrid] = useState(() => {
     try {
       return song.voiceOptions ? (JSON.parse(song.voiceOptions) as { keepHighsHz?: number }).keepHighsHz !== undefined : true;
@@ -316,7 +315,10 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
                 <a href={`/api/songs/${song.id}/audio?original&download`} className="rounded-md px-2 py-1 text-[11px] text-muted hover:bg-panel-2 hover:text-fg" title="Descargar la versión con la voz original">orig.</a>
               )}
               {song.status === "done" && (
-                <a href={`/api/songs/${song.id}/audio?download`} className="rounded-md px-2 py-1 text-xs text-muted hover:bg-panel-2 hover:text-fg" title="Descargar">⤓</a>
+                <>
+                  <a href={`/api/songs/${song.id}/audio?download`} className="rounded-md px-2 py-1 text-xs text-muted hover:bg-panel-2 hover:text-fg" title="Descargar MP3">⤓</a>
+                  <a href={`/api/songs/${song.id}/audio?format=wav`} className="rounded-md px-2 py-1 text-[11px] text-muted hover:bg-panel-2 hover:text-fg" title="Descargar WAV 24 bits, 48 kHz">WAV</a>
+                </>
               )}
               <button onClick={() => setOpen((v) => !v)} className="rounded-md px-2 py-1 text-xs text-muted hover:bg-panel-2 hover:text-fg" title="Letra y detalles">{open ? "▴" : "▾"}</button>
               <button onClick={onDelete} className="rounded-md px-2 py-1 text-xs text-muted hover:bg-red-500/20 hover:text-red-300" title="Eliminar">✕</button>
@@ -413,7 +415,7 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
                     </span>
                     <span className="flex items-center gap-2">
                       <select value={hybrid ? "hybrid" : "full"} onChange={(e) => setHybrid(e.target.value === "hybrid")} className="max-w-36 rounded-md border border-border bg-panel px-2 py-1 text-xs outline-none focus:border-accent-2" title="Híbrido: la voz convertida solo por debajo de 3 kHz y los agudos del cantante original (menos textura sintética). Completa: toda la voz re-sintetizada por Seed-VC.">
-                        <option value="hybrid">Híbrido (recomendado)</option>
+                        <option value="hybrid">Conversión híbrida</option>
                         <option value="full">Conversión completa</option>
                       </select>
                       <select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} className="max-w-36 rounded-md border border-border bg-panel px-2 py-1 text-xs outline-none focus:border-accent-2" title="Voz con la que se reconvierte">
@@ -438,7 +440,13 @@ function SongCard({ song, active, artists, voices, onVoicesChanged, onAlbumsChan
                   <button onClick={applyPostProduction} disabled={processing || (enhance === song.enhanced && preset === song.masterPreset)} className="rounded-md bg-accent-2 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40">
                     {processing ? "Procesando…" : "Aplicar"}
                   </button>
-                  {song.rawAudioFile && <a href={`/api/songs/${song.id}/audio?raw&download`} className="text-muted hover:text-fg">descargar sin procesar</a>}
+                  {song.rawAudioFile && (
+                    <span className="text-muted">
+                      <a href={`/api/songs/${song.id}/audio?raw&download`} className="hover:text-fg">descargar sin procesar</a>
+                      {" · "}
+                      <a href={`/api/songs/${song.id}/audio?raw&format=wav`} className="hover:text-fg" title="WAV 24 bits, 48 kHz">WAV</a>
+                    </span>
+                  )}
                   <span className="text-[11px] text-muted">Siempre se parte del audio original del modelo; puedes volver a «Sin procesar» cuando quieras.</span>
                 </div>
                 {ppError && <p className="mt-1 text-red-300">{ppError}</p>}

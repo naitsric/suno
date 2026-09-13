@@ -45,7 +45,10 @@ export default function Player({ song, onEnded, onPrev, onNext, onTime }: { song
           <span className="w-10 font-mono">{fmtTime(dur)}</span>
         </div>
         {song && (
-          <a href={`/api/songs/${song.id}/audio?download`} className="rounded-md border border-border px-3 py-1.5 text-xs text-muted hover:text-fg">Descargar</a>
+          <>
+            <a href={`/api/songs/${song.id}/audio?download`} className="rounded-md border border-border px-3 py-1.5 text-xs text-muted hover:text-fg">Descargar</a>
+            <a href={`/api/songs/${song.id}/audio?format=wav`} className="rounded-md border border-border px-3 py-1.5 text-xs text-muted hover:text-fg" title="WAV 24 bits, 48 kHz">WAV</a>
+          </>
         )}
       </div>
     </footer>

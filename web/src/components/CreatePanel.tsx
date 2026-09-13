@@ -24,7 +24,7 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
   const [model, setModel] = useState<string>("");
   const [useVoice, setUseVoice] = useState(false);
   /** convert = Seed-VC over the generation; match = generate several and score which singer is closest (no conversion). */
-  const [voiceMode, setVoiceMode] = useState<"convert" | "match">("convert");
+  const [voiceMode, setVoiceMode] = useState<"convert" | "match">("match");
   /** Hybrid conversion (Seed-VC below 3 kHz, the generated singer's highs above): the full re-synthesis sounded metallic. */
   const [hybrid, setHybrid] = useState(true);
   const [variants, setVariants] = useState(2);
@@ -233,7 +233,7 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
       {!instrumental && (
         <div className="rounded-lg border border-border bg-panel px-3 py-2.5 text-sm">
           <label className="flex items-center justify-between">
-            <span>🎤 {artist ? `Cantar con la voz de ${artist.name}` : "Cantar con mi voz"}</span>
+            <span>🎤 {artist ? `Voz de referencia de ${artist.name}` : "Mi voz como referencia"}</span>
             <Toggle checked={useVoice} onChange={setUseVoice} />
           </label>
           {useVoice && (
@@ -250,12 +250,12 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
                 </select>
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <select value={voiceMode} onChange={(e) => setVoiceMode(e.target.value as "convert" | "match")} className={inputCls} title="Convertir: Seed-VC re-sintetiza la voz (puede sonar sintética). Elegir: se generan varias y se mide cuál canta más parecido, sin convertir.">
-                    <option value="convert">Convertir la voz (Seed-VC)</option>
-                    <option value="match">Elegir la generación más parecida (sin convertir)</option>
+                    <option value="match">Elegir por parecido (recomendado)</option>
+                    <option value="convert">Convertir la voz (experimental)</option>
                   </select>
                   {voiceMode === "convert" && (
                     <select value={hybrid ? "hybrid" : "full"} onChange={(e) => setHybrid(e.target.value === "hybrid")} className={inputCls} title="Híbrido: voz convertida solo por debajo de 3 kHz y agudos del cantante generado (menos textura sintética). Completa: toda la voz re-sintetizada.">
-                      <option value="hybrid">Híbrido (recomendado)</option>
+                      <option value="hybrid">Conversión híbrida</option>
                       <option value="full">Conversión completa</option>
                     </select>
                   )}
@@ -267,7 +267,8 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
                   </label>
                 </div>
                 <p className="text-[11px] text-muted">
-                  {!status?.voice.online ? "El servicio de voz está apagado: ejecuta make voice." : voiceMode === "match" ? "Se generan varias y cada una recibe un parecido con la voz; te quedas con la mejor, sin vocoder por medio." : "La canción se genera y después se convierte a tu timbre (1–3 min extra)."}
+                  {voiceMode === "match" ? "Conserva la interpretación original y mide el parecido con la referencia para ayudarte a elegir. El timbre puede variar entre canciones." : "Reemplaza el timbre después de generar. Puede introducir gallos y textura artificial, también en modo híbrido."}
+                  {!status?.voice.online && " Enciende el servicio de voz para medir el parecido o convertir: make voice."}
                   {isRegister(selectedVoice?.register) && ` La música se escribe en registro de ${REGISTER_LABEL[selectedVoice.register].toLowerCase()} para que la voz no se fuerce en los agudos.`}
                 </p>
                 {selectedVoice && isRegister(selectedVoice.register) && (
@@ -275,13 +276,13 @@ export default function CreatePanel({ status, voices, artist, albums, draft, onC
                     <span className="font-sans">Se añade al estilo:</span> {voicePromptTags(selectedVoice.register, parseVoiceProfile(selectedVoice))}
                   </p>
                 )}
-                <label className="flex items-center justify-between gap-3 text-xs">
+                {voiceMode === "convert" && <label className="flex items-center justify-between gap-3 text-xs">
                   <span>
                     <span className="block">Afinar la voz (autotune)</span>
                     <span className="block text-[11px] text-muted">Corrige la entonación a la escala de la canción al convertir. Se puede cambiar después por canción.</span>
                   </span>
                   <Toggle checked={autotune} onChange={setAutotune} />
-                </label>
+                </label>}
               </div>
             )
           )}

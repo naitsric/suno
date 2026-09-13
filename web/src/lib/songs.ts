@@ -72,8 +72,9 @@ export async function createSong(input: CreateSongInput): Promise<Song[]> {
   let register: Register | null = null;
   let voiceTags = "";
   let brief: string | null = null;
-  if (input.voiceId && !input.instrumental) {
-    let v = getVoice(input.voiceId);
+  const referenceVoiceId = input.voiceId ?? input.voiceMatchId;
+  if (referenceVoiceId && !input.instrumental) {
+    let v = getVoice(referenceVoiceId);
     if (!v) throw new Error("La voz seleccionada ya no existe.");
     if (v.profile === null) v = await analyzeVoice(v);
     register = voiceRegister(v);

@@ -27,3 +27,4 @@ engine/video/poc/cache/
 engine/video/.instance_*
 engine/video/.sg_id
 engine/video/.volume_id
+engine/video/stills/out/

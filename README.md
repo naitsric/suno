@@ -114,6 +114,13 @@ análisis tarda 3–5 min con el modelo de 12B y se cachea por fotografía + per
 
 ### Cantar con mi voz
 
+**Preferencia actual (9 sept. 2026): naturalidad.** Al crear se usa por defecto «Elegir por parecido»:
+el perfil de la referencia orienta el estilo y registro, y se puntúan las tomas conservando su voz
+generada. El parecido no garantiza un timbre idéntico. La conversión sigue disponible de forma
+explícita como experimental: «Cien Veces» de Tokio presentó gallos incluso en modo híbrido a 3 kHz,
+sin autotune ni cambio de octava. Las recomendaciones históricas del híbrido de abajo quedan
+reemplazadas por esta preferencia.
+
 1. En la pestaña **Mi voz** grabas 10–30 s hablando (o subes un archivo). El micrófono se captura en
    crudo (sin cancelación de eco, supresión de ruido ni AGC del navegador: esos filtros dejan la voz
    hueca y el modelo aprende ese timbre). Se normaliza a WAV mono 44.1 kHz en `web/data/voices/` y se
@@ -366,6 +373,27 @@ lo dice en la etapa. En la práctica: con motor + voz + Ollama residentes se arr
 <modelo>` y apagar motor o voz mientras renderiza. Un solo trabajo pesado a la vez (`_gpu_lock`),
 la pipeline se libera al terminar, y las imágenes ya renderizadas se reutilizan si el trabajo se
 relanza en el mismo directorio.
+
+## Reels de un álbum (🎞 vertical, sin IA)
+
+`engine/video/stills/reel.py` saca un reel 1080x1920 de ~25 s por canción: el primer coro, la portada del
+álbum con movimiento suave sobre fondo difuminado, artista y título arriba, y la letra en karaoke abajo.
+
+```bash
+cd engine/video/stills
+../.venv/bin/python reel.py --album "Las cosas sencillas"            # todas las canciones del álbum
+../.venv/bin/python reel.py --album "Las cosas sencillas" --song "El Bote" --seconds 30
+```
+
+- La letra con tiempos se pide una vez al servicio de voz (`make voice`, `POST /align-lyrics`) y se cachea en
+  `engine/video/stills/out/reels/<songId>.lyrics.json`; con `--align-only` solo alinea. Si la canción ya tiene
+  `lyrics` alineadas en su storyboard, se usan esas. Apaga el servicio de voz al terminar: ocupa 14 GB.
+- El fragmento empieza en la primera línea del `[Chorus]` de la letra (por posición, no por texto, para no
+  confundirlo con el intro) y termina al final de una línea. Si el alineador "aprieta" varias líneas en
+  menos de un segundo (tiempos interpolados entre anclas), el reel se corta antes de ese tramo aunque quede
+  en 19-20 s. Sin `[Chorus]`, usa la ventana de más energía (librosa).
+- Salida: `engine/video/stills/out/reels/<slug>.mp4` y `out/reels/<songId>/reel.json` con el tramo usado.
+  Render: ~6 s por canción.
 
 ## Video animado estilo Pixar (PoC, `engine/video/poc` y `engine/video/cloud`)
 
