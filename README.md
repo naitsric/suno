@@ -51,7 +51,8 @@ Suno/
     ├── src/app/api    # /artists, /albums, /songs, /songs/[id]/{audio,master,edit}, /voices, /lyrics, /engine
     ├── src/lib        # acestep.ts, voice.ts (clientes), ollama.ts, songs.ts, voices.ts, artists.ts, master.ts, market.ts, market-ideas.ts
     └── data/          # suno.db + audio/ + voices/ (ignorado por git)
-├── db/suno.dump.sql   # volcado SQL del catálogo (artistas, álbumes, canciones, voces); sin audio
+├── db/suno.db         # copia completa de la base SQLite (incluye la caché); sin audio
+├── db/suno.dump.sql   # volcado SQL legible del catálogo (artistas, álbumes, canciones, voces)
 └── .claude/skills/    # skills de Claude Code: suno-music-studio y suno-video-studio
 ```
 
@@ -70,9 +71,16 @@ make dev      # motor (:8001) + voz (:8002) + web (:3000)
 La primera vez el motor descarga ~6 GB de pesos a `engine/ACE-Step-1.5/checkpoints/`.
 Abre http://localhost:3000.
 
-### Catálogo (`db/suno.dump.sql`)
+### Catálogo (`db/suno.db` y `db/suno.dump.sql`)
 
-La base es SQLite (`web/data/suno.db`, ignorada por git). El volcado guarda las tablas `artists`, `albums`,
+La base es SQLite (`web/data/suno.db`, ignorada por git porque la app la escribe mientras corre). En `db/`
+hay dos copias: `suno.db` es el archivo completo, caché incluida, y basta con copiarlo:
+
+```bash
+mkdir -p web/data && cp db/suno.db web/data/suno.db
+```
+
+El volcado `suno.dump.sql` es la versión legible para ver los cambios en un diff. Guarda las tablas `artists`, `albums`,
 `songs` y `voices` (títulos, letras, estilos, estado y perfiles vocales) para saber qué canciones existen y a
 qué álbum van; no incluye la caché ni los archivos de audio, así que las rutas `audio_file` apuntan a archivos
 que hay que copiar aparte. Para partir de él en una máquina limpia:
@@ -81,9 +89,10 @@ que hay que copiar aparte. Para partir de él en una máquina limpia:
 mkdir -p web/data && sqlite3 web/data/suno.db < db/suno.dump.sql
 ```
 
-Para regenerarlo después de cambiar el catálogo:
+Para regenerar las dos copias después de cambiar el catálogo (`.backup` es seguro con la app encendida):
 
 ```bash
+sqlite3 web/data/suno.db ".backup db/suno.db"
 { head -1 db/suno.dump.sql; sqlite3 web/data/suno.db ".dump songs" ".dump artists" ".dump albums" ".dump voices"; } > db/suno.dump.sql
 ```
 
