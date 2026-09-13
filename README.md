@@ -51,6 +51,8 @@ Suno/
     ├── src/app/api    # /artists, /albums, /songs, /songs/[id]/{audio,master,edit}, /voices, /lyrics, /engine
     ├── src/lib        # acestep.ts, voice.ts (clientes), ollama.ts, songs.ts, voices.ts, artists.ts, master.ts, market.ts, market-ideas.ts
     └── data/          # suno.db + audio/ + voices/ (ignorado por git)
+├── db/suno.dump.sql   # volcado SQL del catálogo (artistas, álbumes, canciones, voces); sin audio
+└── .claude/skills/    # skills de Claude Code: suno-music-studio y suno-video-studio
 ```
 
 ## Requisitos
@@ -67,6 +69,23 @@ make dev      # motor (:8001) + voz (:8002) + web (:3000)
 
 La primera vez el motor descarga ~6 GB de pesos a `engine/ACE-Step-1.5/checkpoints/`.
 Abre http://localhost:3000.
+
+### Catálogo (`db/suno.dump.sql`)
+
+La base es SQLite (`web/data/suno.db`, ignorada por git). El volcado guarda las tablas `artists`, `albums`,
+`songs` y `voices` (títulos, letras, estilos, estado y perfiles vocales) para saber qué canciones existen y a
+qué álbum van; no incluye la caché ni los archivos de audio, así que las rutas `audio_file` apuntan a archivos
+que hay que copiar aparte. Para partir de él en una máquina limpia:
+
+```bash
+mkdir -p web/data && sqlite3 web/data/suno.db < db/suno.dump.sql
+```
+
+Para regenerarlo después de cambiar el catálogo:
+
+```bash
+{ head -1 db/suno.dump.sql; sqlite3 web/data/suno.db ".dump songs" ".dump artists" ".dump albums" ".dump voices"; } > db/suno.dump.sql
+```
 
 ## Cómo funciona
 
